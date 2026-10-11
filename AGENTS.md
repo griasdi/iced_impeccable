@@ -2,7 +2,7 @@
 
 Two things live here:
 
-1. A Rust library that runs any iced 0.14 `Application` headless behind a
+1. A Rust library that runs any iced 0.14 `Application` or `Daemon` headless behind a
    control socket (Unix socket, Windows named pipe): offscreen hardware
    rendering, injected keyboard and mouse input, a widget inventory with
    addressable targets, waits, screenshots with crop/zoom/annotation, and
@@ -27,6 +27,7 @@ Two things live here:
 | `src/image.rs` | PNG I/O, crop, zoom, annotation, pointer sprite, contact sheet |
 | `src/cli.rs`, `src/bin/iced-impeccable.rs` | standalone binary |
 | `examples/demo.rs` | demo app exercising every protocol path |
+| `examples/multiwin.rs` | daemon with two windows, for window selection |
 | `plugin/skills/iced-impeccable/` | `SKILL.md` and `reference/*.md` |
 | `scripts/smoke.sh` | end-to-end smoke: demo headless, every protocol path checked |
 | `.github/workflows/ci.yml` | CI: Linux and Windows (clippy, test, smoke on tiny-skia), cargo-deny |

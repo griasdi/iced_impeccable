@@ -6,7 +6,7 @@
 [![docs.rs](https://img.shields.io/docsrs/iced_impeccable)](https://docs.rs/iced_impeccable)
 [![iced 0.14](https://img.shields.io/badge/iced-0.14-blue.svg)](https://iced.rs)
 
-Headless remote control for [iced](https://iced.rs) 0.14 applications, built
+Headless remote control for [iced](https://iced.rs) 0.14 applications and daemons, built
 for coding agents that need to see and operate the UI they change, plus a
 companion skill that brings the
 [impeccable](https://impeccable.style) design workflow to iced
@@ -57,6 +57,7 @@ fn main() -> iced::Result {
 - Code that must not open OS dialogs checks `iced_impeccable::is_headless()`.
 - Desktop integration that must not run headless (tray icons) goes into
   `.windowed(|| ...)`; headless-only setup into `.headless(|| ...)`.
+- A daemon (`iced::daemon(...)`) is wrapped the same way: `Remote::new(daemon)`.
 - Release builds never enable `remote`.
 
 ## Run
@@ -102,7 +103,8 @@ logical pixel times the scale.
 | Command | Reply |
 |---|---|
 | `help` | `ok` + one line per command, targets, keys, coordinates, custom commands |
-| `info` | `ok pid P app NAME size WxH scale S appearance dark\|light backend NAME` |
+| `info` | `ok pid P app NAME size WxH scale S appearance dark\|light backend NAME windows N` |
+| `windows` | `ok N` + one `INDEX WxH scale S title="TITLE"` line per open window |
 | `size` | `ok W H SCALE` |
 | `move X Y [MS]`, `down [BUTTON]`, `up [BUTTON]`, `click X Y [BUTTON] [MODS]`, `dblclick X Y`, `drag X1 Y1 X2 Y2 [STEPS] [MS]` | `ok` |
 | `scroll X Y DY [DX]` | `ok`; wheel lines, DY>0 scrolls up, DY<0 scrolls down |
@@ -124,6 +126,18 @@ logical pixel times the scale.
 | `drop PATH` | `ok`; FileHovered then FileDropped |
 | `quit` | `ok`, or `ok forced` when the app ignored the close request for 5 s |
 | `<custom> [ARGS]` | `ok`, `err NAME: ...`, or `err unknown command "NAME" (see help)` |
+
+**Several windows**: a daemon, or an app that opens more windows, has several
+pretend windows, numbered from 1 in the order they opened (`windows` lists
+them). A command addresses the oldest open window unless its line starts with
+`@N `: `@2 tap Close`, `@2 screenshot second.png`. `ctl --window N` puts
+`@N ` in front of every line that has none. A missing window answers
+`err no window N (open: 1..M, see windows)`, or `err no window open`. `help`,
+`windows`, `clip`, `clip-set`, `appearance`, `wait-idle`, `record-stop`,
+`quit` and custom commands ignore the selector. When a window closes,
+`wait-gone` on it answers `ok`, `wait-for` `err window closed`, and its
+recording ends. `quit` delivers the close request to the oldest window that
+handles close requests itself; a daemon exits only through `iced::exit`.
 
 **Targets**: `#ID` (widget id), `~SUBSTRING` (text contains), otherwise exact
 text. `--nth N` picks the Nth match (1-based, tree order). Errors say what to

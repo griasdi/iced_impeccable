@@ -1,6 +1,7 @@
-//! Headless remote control for iced 0.14 applications.
+//! Headless remote control for iced 0.14 applications and daemons.
 //!
-//! Wrap the `iced::application(...)` value in [`Remote`] (or call [`run`]):
+//! Wrap the `iced::application(...)` or `iced::daemon(...)` value in
+//! [`Remote`] (or call [`run`]):
 //!
 //! ```no_run
 //! # #[derive(Debug, Clone)]
@@ -25,6 +26,10 @@
 //!
 //! [`Remote::windowed`] and [`Remote::headless`] run setup for only one of
 //! the two app modes, such as a tray icon or stub devices.
+//!
+//! A daemon or an app with more windows has several pretend windows: `ctl`
+//! addresses window N with a leading `@N` on the command line or with
+//! `--window N`, and `windows` lists them.
 //!
 //! `<bin> ctl <socket> help` lists the protocol. The standalone
 //! `iced-impeccable` binary offers the same client plus contact sheets.
