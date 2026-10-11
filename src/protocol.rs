@@ -18,7 +18,12 @@ pub(crate) const USAGE: &[(&str, &str, &str)] = &[
     (
         "info",
         "info",
-        "pid, app name, window size, scale, appearance, renderer",
+        "pid, app name, window size, scale, appearance, renderer, window count",
+    ),
+    (
+        "windows",
+        "windows",
+        "open windows: ok N, then one line each",
     ),
     ("size", "size", "UI size and total scale: ok W H SCALE"),
     (
@@ -162,6 +167,7 @@ pub(crate) struct Shot {
 pub(crate) enum Command {
     Help,
     Info,
+    Windows,
     Size,
     /// `over` spreads the move from the current cursor across that time.
     Move {
@@ -265,6 +271,40 @@ pub(crate) fn split_options(rest: &str, spec: OptionSpec) -> Result<(Options<'_>
     Ok((options, rest))
 }
 
+/// One request line: a command and the window it addresses.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct Request {
+    /// The 1-based window number of a leading `@N`; `None` addresses the
+    /// oldest open window.
+    pub(crate) window: Option<usize>,
+    pub(crate) command: Command,
+}
+
+impl Request {
+    pub(crate) fn parse(line: &str) -> Result<Self, String> {
+        let line = line.trim_end_matches(['\r', '\n']);
+        let Some(selector) = line.strip_prefix('@') else {
+            return Ok(Request {
+                window: None,
+                command: Command::parse(line)?,
+            });
+        };
+        let (number, rest) = next_word(selector);
+        let window = match number.parse::<usize>() {
+            Ok(n) if n >= 1 => n,
+            _ => {
+                return Err(format!(
+                    "window selector \"@{number}\" is not a window number"
+                ));
+            }
+        };
+        Ok(Request {
+            window: Some(window),
+            command: Command::parse(rest)?,
+        })
+    }
+}
+
 /// The first whitespace-separated word and what follows it, leading
 /// whitespace of the remainder removed.
 fn next_word(text: &str) -> (&str, &str) {
@@ -321,6 +361,10 @@ impl Command {
             "info" => {
                 arity(0, 0)?;
                 Command::Info
+            }
+            "windows" => {
+                arity(0, 0)?;
+                Command::Windows
             }
             "size" => {
                 arity(0, 0)?;
@@ -622,6 +666,39 @@ mod tests {
         assert!(Command::parse("keydown a b").is_err());
         assert!(Command::parse("resize 0 10").is_err());
         assert_eq!(Command::parse("").unwrap_err(), "empty command");
+    }
+
+    #[test]
+    fn a_leading_at_selects_the_window() {
+        assert_eq!(
+            Request::parse("@2 tap Save").unwrap(),
+            Request {
+                window: Some(2),
+                command: Command::Tap {
+                    target: Target::Text("Save".into()),
+                    nth: None
+                }
+            }
+        );
+        assert_eq!(
+            Request::parse("tree").unwrap(),
+            Request {
+                window: None,
+                command: Command::Tree { all: false }
+            }
+        );
+        assert_eq!(
+            Request::parse("@0 tree").unwrap_err(),
+            "window selector \"@0\" is not a window number"
+        );
+        assert_eq!(
+            Request::parse("@x tree").unwrap_err(),
+            "window selector \"@x\" is not a window number"
+        );
+        assert_eq!(
+            Request::parse("windows extra").unwrap_err(),
+            "windows: wrong number of arguments; usage: windows"
+        );
     }
 
     #[test]

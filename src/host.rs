@@ -22,7 +22,7 @@ use iced::advanced::widget::Operation;
 use iced::advanced::widget::operation::{self, Outcome};
 use iced::keyboard::Modifiers;
 use iced::theme::{Base, Mode};
-use iced::{Event, Point, Program, Rectangle, Size, mouse};
+use iced::{Event, Point, Program, Rectangle, Size, event, mouse};
 use iced_futures::futures::StreamExt;
 use iced_futures::futures::channel::mpsc as futures_mpsc;
 use iced_futures::{Executor, Runtime, subscription};
@@ -34,7 +34,7 @@ use crate::args::HostArgs;
 use crate::channel::{self, Inflight};
 use crate::image::{self, Frame};
 use crate::keys::{Keystroke, key_down_events, key_events, key_up_events};
-use crate::protocol::{self, Command, Shot};
+use crate::protocol::{self, Command, Request, Shot};
 use crate::target::{self, Node, Target};
 
 /// The frame interval while the interface asks for the next frame.
@@ -62,8 +62,6 @@ const QUIT_GRACE: Duration = Duration::from_secs(5);
 const DRAIN_TIMEOUT: Duration = Duration::from_secs(2);
 /// Frame rate of `record`.
 const RECORD_FPS: u32 = 30;
-/// The window size when neither `--size` nor the app's settings give one.
-const DEFAULT_SIZE: Size = Size::new(1024.0, 768.0);
 
 /// Turns the rest of a custom command's line into a message.
 pub(crate) type Build<M> = Box<dyn Fn(&str) -> Result<M, String>>;
@@ -99,7 +97,7 @@ enum HostEvent<M> {
 /// Everything the loop waits on.
 enum Input<M> {
     Host(HostEvent<M>),
-    Control(Command, mpsc::Sender<String>),
+    Control(Request, mpsc::Sender<String>),
 }
 
 /// Runs the program headless until it exits, then ends the process.
@@ -175,23 +173,19 @@ struct Host<A: Program> {
     state: A::State,
     hooks: Hooks<A::Message>,
     runtime: HostRuntime<A>,
+    /// One offscreen renderer draws every window.
     renderer: A::Renderer,
-    cache: user_interface::Cache,
     inputs: mpsc::Receiver<Input<A::Message>>,
-    window: window::Id,
-    window_settings: Option<window::Settings>,
-    /// OS-logical size of the pretend window.
-    window_size: Size,
-    /// The scale factor the pretend OS reports.
+    /// The open pretend windows, oldest first.
+    windows: Vec<WindowState>,
+    /// A daemon: it opens its windows itself and outlives them.
+    daemon: bool,
+    /// `--size`, until the first window takes it.
+    first_size: Option<Size>,
+    /// The scale factor the pretend OS reports for a new window.
     os_scale: f32,
     appearance: Mode,
-    /// Whether the app maximized the pretend window; only the app's own query sees it.
-    maximized: bool,
-    cursor: mouse::Cursor,
     clipboard: MemoryClipboard,
-    /// When the interface wants its next `RedrawRequested`.
-    redraw: window::RedrawRequest,
-    last_frame: Instant,
     /// When the last host event that was not a heartbeat arrived.
     last_activity: Instant,
     /// When `update` last ran, heartbeat or not.
@@ -200,16 +194,72 @@ struct Host<A: Program> {
     target_waiters: Vec<TargetWaiter>,
     last_target_check: Instant,
     /// Commands that arrived while an input command was settling.
-    queued: VecDeque<(Command, mpsc::Sender<String>)>,
+    queued: VecDeque<(Request, mpsc::Sender<String>)>,
     /// `quit` is answered once the loop has actually ended.
     quit_replies: Vec<mpsc::Sender<String>>,
     /// When a `quit` the app has not acted on ends the process anyway.
     quit_deadline: Option<Instant>,
     quit_forced: bool,
     exit: Option<i32>,
+    recording: Option<Recording>,
+}
+
+/// One pretend window.
+struct WindowState {
+    id: window::Id,
+    settings: window::Settings,
+    /// OS-logical size.
+    size: Size,
+    /// The scale factor the pretend OS reports.
+    os_scale: f32,
+    cache: user_interface::Cache,
+    cursor: mouse::Cursor,
     /// Whether the left button is down, for the pointer a recording draws.
     pressed: bool,
-    recording: Option<Recording>,
+    /// Whether the app maximized it; only the app's own query sees it.
+    maximized: bool,
+    /// When the interface wants its next `RedrawRequested`.
+    redraw: window::RedrawRequest,
+    last_frame: Instant,
+}
+
+impl WindowState {
+    fn new(id: window::Id, settings: window::Settings, size: Size, os_scale: f32) -> Self {
+        let size = clamp(&settings, size);
+        Self {
+            id,
+            settings,
+            size,
+            os_scale,
+            cache: user_interface::Cache::default(),
+            cursor: mouse::Cursor::Unavailable,
+            pressed: false,
+            maximized: false,
+            redraw: window::RedrawRequest::NextFrame,
+            last_frame: Instant::now(),
+        }
+    }
+
+    /// Whether its `RedrawRequested` is due at `now`.
+    fn frame_due(&self, now: Instant) -> bool {
+        match self.redraw {
+            window::RedrawRequest::NextFrame => now >= self.last_frame + FRAME,
+            window::RedrawRequest::At(at) => at <= now,
+            window::RedrawRequest::Wait => false,
+        }
+    }
+}
+
+/// `size` limited to the window's `min_size` and `max_size`.
+fn clamp(settings: &window::Settings, size: Size) -> Size {
+    let mut size = size;
+    if let Some(min) = settings.min_size {
+        size = Size::new(size.width.max(min.width), size.height.max(min.height));
+    }
+    if let Some(max) = settings.max_size {
+        size = Size::new(size.width.min(max.width), size.height.min(max.height));
+    }
+    size
 }
 
 struct IdleWaiter {
@@ -220,6 +270,7 @@ struct IdleWaiter {
 
 /// A `wait-for` (`appear`) or `wait-gone`.
 struct TargetWaiter {
+    window: window::Id,
     target: Target,
     appear: bool,
     deadline: Instant,
@@ -230,6 +281,7 @@ struct TargetWaiter {
 /// writes them to ffmpeg's stdin, so a slow encoder holds the loop back
 /// instead of growing memory.
 struct Recording {
+    window: window::Id,
     path: PathBuf,
     started: Instant,
     /// Frames sent so far; frame `n` shows the time `started + n / fps`.
@@ -296,11 +348,7 @@ where
         args: &HostArgs,
     ) -> Self {
         let (state, boot) = runtime.enter(|| program.boot());
-        let window_settings = program.window();
-        let size = args
-            .size
-            .or(window_settings.as_ref().map(|w| w.size))
-            .unwrap_or(DEFAULT_SIZE);
+        let main = program.window();
         let now = Instant::now();
         let mut host = Self {
             program,
@@ -308,21 +356,16 @@ where
             hooks,
             runtime,
             renderer,
-            cache: user_interface::Cache::default(),
             inputs,
-            window: window::Id::unique(),
-            window_settings,
-            window_size: size,
+            windows: Vec::new(),
+            daemon: main.is_none(),
+            first_size: args.size,
             os_scale: args.scale,
             appearance: args.appearance,
-            maximized: false,
-            cursor: mouse::Cursor::Unavailable,
             clipboard: MemoryClipboard {
                 standard: args.clipboard.clone(),
                 primary: None,
             },
-            redraw: window::RedrawRequest::NextFrame,
-            last_frame: now,
             last_activity: now,
             last_update: now,
             idle_waiters: Vec::new(),
@@ -333,92 +376,127 @@ where
             quit_deadline: None,
             quit_forced: false,
             exit: None,
-            pressed: false,
             recording: None,
         };
-        host.window_size = host.clamp(size);
+        // An application's window exists before it boots; a daemon opens its
+        // own through `window::open`.
+        let main = main.map(|settings| {
+            let size = host.first_size.take().unwrap_or(settings.size);
+            let id = window::Id::unique();
+            host.windows
+                .push(WindowState::new(id, settings, size, host.os_scale));
+            id
+        });
         // Subscribed before the first event, so `listen_with` hears the size.
         host.resubscribe();
         host.spawn(boot);
-        let size = host.ui_size();
-        host.deliver(vec![Event::Window(window::Event::Opened {
-            position: None,
-            size,
-        })]);
+        if let Some(id) = main {
+            let size = host.ui_size(id);
+            host.deliver(
+                id,
+                vec![Event::Window(window::Event::Opened {
+                    position: None,
+                    size,
+                })],
+            );
+        }
         host
     }
 
+    fn win(&self, id: window::Id) -> Option<&WindowState> {
+        self.windows.iter().find(|w| w.id == id)
+    }
+
+    fn win_mut(&mut self, id: window::Id) -> Option<&mut WindowState> {
+        self.windows.iter_mut().find(|w| w.id == id)
+    }
+
+    /// The window a command addresses: its 1-based number, the oldest
+    /// without one.
+    fn resolve(&self, number: Option<usize>) -> Result<window::Id, String> {
+        if self.windows.is_empty() {
+            return Err("no window open".to_owned());
+        }
+        let n = number.unwrap_or(1);
+        n.checked_sub(1)
+            .and_then(|i| self.windows.get(i))
+            .map(|w| w.id)
+            .ok_or_else(|| {
+                format!(
+                    "no window {n} (open: 1..{}, see windows)",
+                    self.windows.len()
+                )
+            })
+    }
+
     /// The OS scale times the app's own scale factor.
-    fn total_scale(&self) -> f32 {
-        self.os_scale * self.program.scale_factor(&self.state, self.window)
+    fn total_scale(&self, id: window::Id) -> f32 {
+        let os = self.win(id).map_or(self.os_scale, |w| w.os_scale);
+        os * self.program.scale_factor(&self.state, id)
     }
 
     /// The frame size `render` produces.
-    fn physical_size(&self) -> Size<u32> {
+    fn physical_size(&self, id: window::Id) -> Size<u32> {
+        let (size, os) = self
+            .win(id)
+            .map_or((Size::new(1.0, 1.0), self.os_scale), |w| {
+                (w.size, w.os_scale)
+            });
         Size::new(
-            (self.window_size.width * self.os_scale).round().max(1.0) as u32,
-            (self.window_size.height * self.os_scale).round().max(1.0) as u32,
+            (size.width * os).round().max(1.0) as u32,
+            (size.height * os).round().max(1.0) as u32,
         )
     }
 
     /// The logical size the interface is laid out in.
-    fn ui_size(&self) -> Size {
-        let physical = self.physical_size();
-        let scale = self.total_scale();
+    fn ui_size(&self, id: window::Id) -> Size {
+        let physical = self.physical_size(id);
+        let scale = self.total_scale(id);
         Size::new(
             physical.width as f32 / scale,
             physical.height as f32 / scale,
         )
     }
 
-    /// `size` limited to the app's `min_size` and `max_size`.
-    fn clamp(&self, size: Size) -> Size {
-        let Some(settings) = &self.window_settings else {
-            return size;
-        };
-        let mut size = size;
-        if let Some(min) = settings.min_size {
-            size = Size::new(size.width.max(min.width), size.height.max(min.height));
-        }
-        if let Some(max) = settings.max_size {
-            size = Size::new(size.width.min(max.width), size.height.min(max.height));
-        }
-        size
-    }
-
-    fn theme(&self) -> A::Theme {
+    fn theme(&self, id: window::Id) -> A::Theme {
         self.program
-            .theme(&self.state, self.window)
+            .theme(&self.state, id)
             .unwrap_or_else(|| <A::Theme as Base>::default(self.appearance))
     }
 
-    /// Builds the interface from the current state, hands it to `f`, and
-    /// keeps its cache for the next build.
+    /// Builds the window's interface from the current state, hands it to
+    /// `f`, and keeps its cache for the next build; `None` once the window
+    /// is closed.
     fn with_ui<R>(
         &mut self,
+        id: window::Id,
         f: impl FnOnce(
             &mut UserInterface<'_, A::Message, A::Theme, A::Renderer>,
             &mut A::Renderer,
             &mut MemoryClipboard,
         ) -> R,
-    ) -> R {
-        let size = self.ui_size();
+    ) -> Option<R> {
+        let size = self.ui_size(id);
+        let cache = std::mem::take(&mut self.win_mut(id)?.cache);
         let mut ui = UserInterface::build(
-            self.program.view(&self.state, self.window),
+            self.program.view(&self.state, id),
             size,
-            std::mem::take(&mut self.cache),
+            cache,
             &mut self.renderer,
         );
         let result = f(&mut ui, &mut self.renderer, &mut self.clipboard);
-        self.cache = ui.into_cache();
-        result
+        let cache = ui.into_cache();
+        if let Some(window) = self.win_mut(id) {
+            window.cache = cache;
+        }
+        Some(result)
     }
 
     /// Serves inputs until the app exits; returns the exit code.
     fn run(&mut self) -> i32 {
         loop {
             let input = match self.queued.pop_front() {
-                Some((command, reply)) => Some(Input::Control(command, reply)),
+                Some((request, reply)) => Some(Input::Control(request, reply)),
                 None => match self.wakeup() {
                     Some(after) => match self.inputs.recv_timeout(after) {
                         Ok(input) => Some(input),
@@ -433,7 +511,7 @@ where
             };
             match input {
                 Some(Input::Host(event)) => self.host_event(event),
-                Some(Input::Control(command, reply)) => self.control(command, reply),
+                Some(Input::Control(request, reply)) => self.control(request, reply),
                 None => {}
             }
             if self.exit.is_none()
@@ -511,7 +589,9 @@ where
             .enter(|| self.program.update(&mut self.state, message));
         self.spawn(task);
         self.resubscribe();
-        self.redraw = window::RedrawRequest::NextFrame;
+        for window in &mut self.windows {
+            window.redraw = window::RedrawRequest::NextFrame;
+        }
         self.last_update = Instant::now();
     }
 
@@ -530,31 +610,36 @@ where
         self.runtime.track(recipes);
     }
 
-    /// Feeds events to the interface, broadcasts them to the subscriptions
-    /// with the status the interface gave each, then applies the messages
-    /// the widgets published.
-    fn deliver(&mut self, events: Vec<Event>) {
+    /// Feeds events to the window's interface, broadcasts them to the
+    /// subscriptions with the status the interface gave each, then applies
+    /// the messages the widgets published.
+    fn deliver(&mut self, id: window::Id, events: Vec<Event>) {
+        let Some(window) = self.win_mut(id) else {
+            return;
+        };
         let mut is_frame = false;
         for event in &events {
             match event {
                 Event::Mouse(mouse::Event::CursorMoved { position }) => {
-                    self.cursor = mouse::Cursor::Available(*position);
+                    window.cursor = mouse::Cursor::Available(*position);
                 }
                 Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)) => {
-                    self.pressed = true;
+                    window.pressed = true;
                 }
                 Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left)) => {
-                    self.pressed = false;
+                    window.pressed = false;
                 }
                 Event::Window(window::Event::RedrawRequested(_)) => is_frame = true,
                 _ => {}
             }
         }
-        let cursor = self.cursor;
+        let cursor = window.cursor;
         let mut messages = Vec::new();
-        let (state, statuses) = self.with_ui(|ui, renderer, clipboard| {
+        let Some((state, statuses)) = self.with_ui(id, |ui, renderer, clipboard| {
             ui.update(&events, cursor, renderer, clipboard, &mut messages)
-        });
+        }) else {
+            return;
+        };
 
         let wanted = match state {
             user_interface::State::Updated { redraw_request, .. } => redraw_request,
@@ -562,15 +647,17 @@ where
         };
         // A frame answers the request that was pending; any other event can
         // only bring the next frame closer.
-        self.redraw = if is_frame {
-            wanted
-        } else {
-            self.redraw.min(wanted)
-        };
+        if let Some(window) = self.win_mut(id) {
+            window.redraw = if is_frame {
+                wanted
+            } else {
+                window.redraw.min(wanted)
+            };
+        }
 
         for (event, status) in events.into_iter().zip(statuses) {
             self.runtime.broadcast(subscription::Event::Interaction {
-                window: self.window,
+                window: id,
                 event,
                 status,
             });
@@ -580,26 +667,29 @@ where
         }
     }
 
-    /// Delivers `RedrawRequested` when the interface asked for it.
+    /// Delivers `RedrawRequested` to every window whose interface asked for it.
     fn frame(&mut self) {
         let now = Instant::now();
-        let due = match self.redraw {
-            window::RedrawRequest::NextFrame => now >= self.last_frame + FRAME,
-            window::RedrawRequest::At(at) => at <= now,
-            window::RedrawRequest::Wait => false,
-        };
-        if due {
-            self.last_frame = now;
-            self.deliver(vec![Event::Window(window::Event::RedrawRequested(now))]);
+        let due: Vec<window::Id> = self
+            .windows
+            .iter()
+            .filter(|w| w.frame_due(now))
+            .map(|w| w.id)
+            .collect();
+        for id in due {
+            if let Some(window) = self.win_mut(id) {
+                window.last_frame = now;
+            }
+            self.deliver(id, vec![Event::Window(window::Event::RedrawRequested(now))]);
         }
     }
 
     fn redraw_due(&self, now: Instant) -> bool {
-        match self.redraw {
+        self.windows.iter().any(|w| match w.redraw {
             window::RedrawRequest::NextFrame => true,
             window::RedrawRequest::At(at) => at <= now,
             window::RedrawRequest::Wait => false,
-        }
+        })
     }
 
     /// How long the loop may sleep before a frame, a recorded frame, a
@@ -607,11 +697,15 @@ where
     /// input.
     fn wakeup(&self) -> Option<Duration> {
         let now = Instant::now();
-        let frame = match self.redraw {
-            window::RedrawRequest::NextFrame => Some(self.last_frame + FRAME),
-            window::RedrawRequest::At(at) => Some(at),
-            window::RedrawRequest::Wait => None,
-        };
+        let frame = self
+            .windows
+            .iter()
+            .filter_map(|w| match w.redraw {
+                window::RedrawRequest::NextFrame => Some(w.last_frame + FRAME),
+                window::RedrawRequest::At(at) => Some(at),
+                window::RedrawRequest::Wait => None,
+            })
+            .min();
         let idle = self.idle_waiters.iter().flat_map(|w| {
             let quiet_at = self.last_activity.max(w.since) + w.quiet;
             let give_up = w.since + IDLE_TIMEOUT;
@@ -675,52 +769,167 @@ where
             return;
         }
         self.last_target_check = now;
-        let nodes = self.inventory();
+        let mut inventories: Vec<(window::Id, Vec<Node>)> = Vec::new();
+        for i in 0..self.target_waiters.len() {
+            let id = self.target_waiters[i].window;
+            if self.win(id).is_some() && !inventories.iter().any(|(seen, _)| *seen == id) {
+                let nodes = self.inventory(id);
+                inventories.push((id, nodes));
+            }
+        }
         self.target_waiters.retain(|waiter| {
-            let answer = match target_state(&nodes, &waiter.target, waiter.appear) {
-                Some(answer) => answer,
-                None if now >= waiter.deadline => "err timeout".to_owned(),
-                None => return true,
+            let nodes = inventories
+                .iter()
+                .find(|(id, _)| *id == waiter.window)
+                .map(|(_, nodes)| nodes);
+            let answer = match nodes.map(|nodes| target_state(nodes, &waiter.target, waiter.appear))
+            {
+                None => window_closed(waiter.appear).to_owned(),
+                Some(Some(answer)) => answer,
+                Some(None) if now >= waiter.deadline => "err timeout".to_owned(),
+                Some(None) => return true,
             };
             let _ = waiter.reply.send(answer);
             false
         });
     }
 
-    fn control(&mut self, command: Command, reply: mpsc::Sender<String>) {
+    fn control(&mut self, request: Request, reply: mpsc::Sender<String>) {
+        let Request { window, command } = request;
+        // Commands about the process, not a window, ignore the selector.
         let answer = match command {
             Command::Help => self.help(),
-            Command::Info => {
-                let size = self.ui_size();
-                format!(
-                    "ok pid {} app {} size {}x{} scale {} appearance {} backend {}",
-                    std::process::id(),
-                    A::name(),
-                    size.width,
-                    size.height,
-                    self.total_scale(),
-                    mode_name(self.appearance),
-                    self.renderer.name()
-                )
+            Command::Windows => self.windows(),
+            Command::Info => self.info(window),
+            Command::WaitIdle(quiet) => {
+                self.idle_waiters.push(IdleWaiter {
+                    quiet,
+                    since: Instant::now(),
+                    reply,
+                });
+                return;
             }
+            Command::RecordStop => match self.recording.take() {
+                Some(recording) => recording.finish(),
+                None => "err not recording".to_owned(),
+            },
+            Command::Appearance(mode) => {
+                self.appearance = mode;
+                self.runtime
+                    .broadcast(subscription::Event::SystemThemeChanged(mode));
+                for window in &mut self.windows {
+                    window.redraw = window::RedrawRequest::NextFrame;
+                }
+                self.settle();
+                "ok".to_owned()
+            }
+            Command::Clip => match self.clipboard.read(clipboard::Kind::Standard) {
+                Some(text) => format!("ok {text}"),
+                None => "ok".to_owned(),
+            },
+            Command::ClipSet(text) => {
+                self.clipboard.write(clipboard::Kind::Standard, text);
+                "ok".to_owned()
+            }
+            Command::Quit => {
+                self.quit_replies.push(reply);
+                self.quit();
+                return;
+            }
+            Command::Custom { name, args } => self.custom(&name, &args),
+            command => match self.resolve(window) {
+                Ok(id) => return self.window_command(id, command, reply),
+                Err(e) => format!("err {e}"),
+            },
+        };
+        let _ = reply.send(answer);
+    }
+
+    /// `ok N`, then `INDEX WxH scale S title="TITLE"` for each open window.
+    fn windows(&self) -> String {
+        let mut out = format!("ok {}", self.windows.len());
+        for (i, window) in self.windows.iter().enumerate() {
+            let size = self.ui_size(window.id);
+            let title = self.program.title(&self.state, window.id);
+            out.push_str(&format!(
+                "\n{} {}x{} scale {} title=\"{}\"",
+                i + 1,
+                size.width,
+                size.height,
+                self.total_scale(window.id),
+                title.replace('"', "\\\"")
+            ));
+        }
+        out
+    }
+
+    fn info(&self, window: Option<usize>) -> String {
+        let id = match self.resolve(window) {
+            Ok(id) => Some(id),
+            // A daemon may have no window yet.
+            Err(_) if window.is_none() => None,
+            Err(e) => return format!("err {e}"),
+        };
+        let size = id.map_or_else(String::new, |id| {
+            let size = self.ui_size(id);
+            format!(
+                " size {}x{} scale {}",
+                size.width,
+                size.height,
+                self.total_scale(id)
+            )
+        });
+        format!(
+            "ok pid {} app {}{size} appearance {} backend {} windows {}",
+            std::process::id(),
+            A::name(),
+            mode_name(self.appearance),
+            self.renderer.name(),
+            self.windows.len()
+        )
+    }
+
+    /// Exits at once unless a window handles close requests itself; then
+    /// the oldest such window hears one and the app decides, as for its
+    /// close button, until the deadline ends it.
+    fn quit(&mut self) {
+        let asks = self
+            .windows
+            .iter()
+            .find(|w| !w.settings.exit_on_close_request)
+            .map(|w| w.id);
+        match asks {
+            None => self.exit = Some(0),
+            Some(id) if self.quit_deadline.is_none() => {
+                self.quit_deadline = Some(Instant::now() + QUIT_GRACE);
+                self.deliver(id, vec![Event::Window(window::Event::CloseRequested)]);
+            }
+            Some(_) => {}
+        }
+    }
+
+    /// A command that acts on the window `id`.
+    fn window_command(&mut self, id: window::Id, command: Command, reply: mpsc::Sender<String>) {
+        let answer = match command {
             Command::Size => {
-                let size = self.ui_size();
-                format!("ok {} {} {}", size.width, size.height, self.total_scale())
+                let size = self.ui_size(id);
+                format!("ok {} {} {}", size.width, size.height, self.total_scale(id))
             }
             Command::Move { to, over } if over.is_zero() => {
-                self.pointer(vec![moved(to)], Duration::ZERO)
+                self.pointer(id, vec![moved(to)], Duration::ZERO)
             }
             Command::Move { to, over } => {
-                let from = self.cursor.position().unwrap_or(to);
+                let from = self.win(id).and_then(|w| w.cursor.position()).unwrap_or(to);
                 let steps = u32::try_from(over.as_millis() / 16)
                     .unwrap_or(u32::MAX)
                     .max(1);
-                self.pointer(path(from, to, steps).collect(), over / steps)
+                self.pointer(id, path(from, to, steps).collect(), over / steps)
             }
-            Command::Down(button) => self.pointer(vec![pressed(button)], Duration::ZERO),
-            Command::Up(button) => self.pointer(vec![released(button)], Duration::ZERO),
-            Command::Click(at, button, modifiers) => self.click(at, button, modifiers),
+            Command::Down(button) => self.pointer(id, vec![pressed(button)], Duration::ZERO),
+            Command::Up(button) => self.pointer(id, vec![released(button)], Duration::ZERO),
+            Command::Click(at, button, modifiers) => self.click(id, at, button, modifiers),
             Command::DoubleClick(at) => self.pointer(
+                id,
                 vec![
                     moved(at),
                     pressed(mouse::Button::Left),
@@ -741,9 +950,10 @@ where
                     .chain(path(from, to, steps))
                     .chain([released(mouse::Button::Left)])
                     .collect();
-                self.pointer(events, over / steps)
+                self.pointer(id, events, over / steps)
             }
             Command::Scroll { at, dx, dy } => self.pointer(
+                id,
                 vec![
                     moved(at),
                     Event::Mouse(mouse::Event::WheelScrolled {
@@ -752,37 +962,41 @@ where
                 ],
                 Duration::ZERO,
             ),
-            Command::Key(keystroke) => self.input(key_events(&keystroke)),
-            Command::KeyDown(keystroke) => self.input(key_down_events(&keystroke)),
-            Command::KeyUp(keystroke) => self.input(key_up_events(&keystroke)),
+            Command::Key(keystroke) => self.input(id, key_events(&keystroke)),
+            Command::KeyDown(keystroke) => self.input(id, key_down_events(&keystroke)),
+            Command::KeyUp(keystroke) => self.input(id, key_up_events(&keystroke)),
             Command::Type(text) => {
                 let events: Vec<Event> = text
                     .chars()
                     .flat_map(|c| key_events(&Keystroke::character(c, Modifiers::empty())))
                     .collect();
-                self.input(events)
+                self.input(id, events)
             }
             Command::Tap { target, nth } => {
-                let nodes = self.inventory();
+                let nodes = self.inventory(id);
                 match target::pick(&nodes, &target, nth) {
                     Ok(node) => {
                         let (x, y) = target::centre(node.rect());
-                        let _ =
-                            self.click(Point::new(x, y), mouse::Button::Left, Modifiers::empty());
+                        let _ = self.click(
+                            id,
+                            Point::new(x, y),
+                            mouse::Button::Left,
+                            Modifiers::empty(),
+                        );
                         format!("ok {x} {y}")
                     }
                     Err(e) => format!("err {e}"),
                 }
             }
             Command::Find { target, nth } => {
-                let nodes = self.inventory();
+                let nodes = self.inventory(id);
                 match target::pick(&nodes, &target, nth) {
                     Ok(node) => format!("ok {}", target::rect_words(node.rect())),
                     Err(e) => format!("err {e}"),
                 }
             }
             Command::FindAll(target) => {
-                let nodes = self.inventory();
+                let nodes = self.inventory(id);
                 let lines: Vec<String> = nodes
                     .iter()
                     .filter(|n| target.matches(n))
@@ -801,9 +1015,9 @@ where
                     format!("ok {}\n{}", lines.len(), lines.join("\n"))
                 }
             }
-            Command::Focused => self.focused(),
+            Command::Focused => self.focused(id),
             Command::Tree { all } => {
-                let nodes = self.inventory();
+                let nodes = self.inventory(id);
                 let shown = target::filtered(&nodes, all);
                 let mut out = format!("ok {}", shown.len());
                 for (i, node) in shown.iter().enumerate() {
@@ -813,80 +1027,57 @@ where
                 out
             }
             Command::WaitFor { target, timeout } => {
-                return self.wait_target(target, true, timeout, reply);
+                return self.wait_target(id, target, true, timeout, reply);
             }
             Command::WaitGone { target, timeout } => {
-                return self.wait_target(target, false, timeout, reply);
+                return self.wait_target(id, target, false, timeout, reply);
             }
-            Command::WaitIdle(quiet) => {
-                self.idle_waiters.push(IdleWaiter {
-                    quiet,
-                    since: Instant::now(),
-                    reply,
-                });
-                return;
-            }
-            Command::Screenshot(shot) => self.screenshot_command(shot),
-            Command::Record(path) => self.record(path),
-            Command::RecordStop => match self.recording.take() {
-                Some(recording) => recording.finish(),
-                None => "err not recording".to_owned(),
-            },
+            Command::Screenshot(shot) => self.screenshot_command(id, shot),
+            Command::Record(path) => self.record(id, path),
             // A video has one frame size.
-            Command::Resize(_) | Command::Scale(_) if self.recording.is_some() => {
+            Command::Resize(_) | Command::Scale(_)
+                if self.recording.as_ref().is_some_and(|r| r.window == id) =>
+            {
                 "err stop the recording first".to_owned()
             }
             Command::Resize(size) => {
-                self.window_size = self.clamp(size);
-                let size = self.ui_size();
-                let _ = self.input([Event::Window(window::Event::Resized(size))]);
+                if let Some(window) = self.win_mut(id) {
+                    window.size = clamp(&window.settings, size);
+                }
+                let size = self.ui_size(id);
+                let _ = self.input(id, [Event::Window(window::Event::Resized(size))]);
                 format!("ok {} {}", size.width, size.height)
             }
             Command::Scale(scale) => {
-                self.os_scale = scale;
-                let size = self.ui_size();
-                self.input([
-                    Event::Window(window::Event::Rescaled(scale)),
-                    Event::Window(window::Event::Resized(size)),
-                ])
-            }
-            Command::Appearance(mode) => {
-                self.appearance = mode;
-                self.runtime
-                    .broadcast(subscription::Event::SystemThemeChanged(mode));
-                self.redraw = window::RedrawRequest::NextFrame;
-                self.settle();
-                "ok".to_owned()
-            }
-            Command::Clip => match self.clipboard.read(clipboard::Kind::Standard) {
-                Some(text) => format!("ok {text}"),
-                None => "ok".to_owned(),
-            },
-            Command::ClipSet(text) => {
-                self.clipboard.write(clipboard::Kind::Standard, text);
-                "ok".to_owned()
-            }
-            Command::Drop(path) => self.input([
-                Event::Window(window::Event::FileHovered(path.clone())),
-                Event::Window(window::Event::FileDropped(path)),
-            ]),
-            Command::Quit => {
-                self.quit_replies.push(reply);
-                let exits = self
-                    .window_settings
-                    .as_ref()
-                    .is_none_or(|w| w.exit_on_close_request);
-                if exits {
-                    self.exit = Some(0);
-                } else if self.quit_deadline.is_none() {
-                    // The app decides, as it would for the close button;
-                    // it ends the runtime itself or is ended at the deadline.
-                    self.quit_deadline = Some(Instant::now() + QUIT_GRACE);
-                    self.deliver(vec![Event::Window(window::Event::CloseRequested)]);
+                if let Some(window) = self.win_mut(id) {
+                    window.os_scale = scale;
                 }
-                return;
+                let size = self.ui_size(id);
+                self.input(
+                    id,
+                    [
+                        Event::Window(window::Event::Rescaled(scale)),
+                        Event::Window(window::Event::Resized(size)),
+                    ],
+                )
             }
-            Command::Custom { name, args } => self.custom(&name, &args),
+            Command::Drop(path) => self.input(
+                id,
+                [
+                    Event::Window(window::Event::FileHovered(path.clone())),
+                    Event::Window(window::Event::FileDropped(path)),
+                ],
+            ),
+            Command::Help
+            | Command::Info
+            | Command::Windows
+            | Command::WaitIdle(_)
+            | Command::RecordStop
+            | Command::Appearance(_)
+            | Command::Clip
+            | Command::ClipSet(_)
+            | Command::Quit
+            | Command::Custom { .. } => unreachable!("answered by control"),
         };
         let _ = reply.send(answer);
     }
@@ -933,18 +1124,20 @@ where
     /// leaves a waiter for the loop otherwise.
     fn wait_target(
         &mut self,
+        id: window::Id,
         target: Target,
         appear: bool,
         timeout: Duration,
         reply: mpsc::Sender<String>,
     ) {
-        let nodes = self.inventory();
+        let nodes = self.inventory(id);
         if let Some(answer) = target_state(&nodes, &target, appear) {
             let _ = reply.send(answer);
             return;
         }
         self.last_target_check = Instant::now();
         self.target_waiters.push(TargetWaiter {
+            window: id,
             target,
             appear,
             deadline: Instant::now() + timeout,
@@ -952,7 +1145,13 @@ where
         });
     }
 
-    fn click(&mut self, at: Point, button: mouse::Button, modifiers: Modifiers) -> String {
+    fn click(
+        &mut self,
+        id: window::Id,
+        at: Point,
+        button: mouse::Button,
+        modifiers: Modifiers,
+    ) -> String {
         let mut events = vec![moved(at), pressed(button), released(button)];
         if !modifiers.is_empty() {
             events.insert(
@@ -963,14 +1162,14 @@ where
                 Modifiers::empty(),
             )));
         }
-        self.pointer(events, Duration::ZERO)
+        self.pointer(id, events, Duration::ZERO)
     }
 
     /// Delivers input one event at a time, as a window would across frames,
     /// then lets the answers from subscriptions arrive before replying.
-    fn input(&mut self, events: impl IntoIterator<Item = Event>) -> String {
+    fn input(&mut self, id: window::Id, events: impl IntoIterator<Item = Event>) -> String {
         for event in events {
-            self.deliver(vec![event]);
+            self.deliver(id, vec![event]);
             if self.exit.is_some() {
                 break;
             }
@@ -984,10 +1183,10 @@ where
     /// the press must be processed before the first move arrives. A zero
     /// `interval` settles after each event; otherwise event `i` is followed
     /// by running the loop until `start + interval * (i + 1)`.
-    fn pointer(&mut self, events: Vec<Event>, interval: Duration) -> String {
+    fn pointer(&mut self, id: window::Id, events: Vec<Event>, interval: Duration) -> String {
         let start = Instant::now();
         for (i, event) in (1u32..).zip(events) {
-            self.deliver(vec![event]);
+            self.deliver(id, vec![event]);
             if self.exit.is_some() {
                 break;
             }
@@ -1006,7 +1205,7 @@ where
         while self.exit.is_none() && start.elapsed() < SETTLE_MAX {
             match self.inputs.recv_timeout(SETTLE) {
                 Ok(Input::Host(event)) => self.host_event(event),
-                Ok(Input::Control(command, reply)) => self.queued.push_back((command, reply)),
+                Ok(Input::Control(request, reply)) => self.queued.push_back((request, reply)),
                 Err(_) => break,
             }
             self.frame();
@@ -1027,7 +1226,7 @@ where
                 .map_or(until - now, |after| after.min(until - now));
             match self.inputs.recv_timeout(wait) {
                 Ok(Input::Host(event)) => self.host_event(event),
-                Ok(Input::Control(command, reply)) => self.queued.push_back((command, reply)),
+                Ok(Input::Control(request, reply)) => self.queued.push_back((request, reply)),
                 Err(mpsc::RecvTimeoutError::Timeout) => {}
                 Err(mpsc::RecvTimeoutError::Disconnected) => break,
             }
@@ -1036,30 +1235,34 @@ where
         }
     }
 
-    /// Every widget the interface reports, in tree order, double reports
-    /// merged.
-    fn inventory(&mut self) -> Vec<Node> {
-        let nodes = self.with_ui(|ui, renderer, _| {
-            let mut selector = target::select.find_all();
-            ui.operate(renderer, &mut operation::black_box(&mut selector));
-            match selector.finish() {
-                Outcome::Some(nodes) => nodes,
-                _ => Vec::new(),
-            }
-        });
+    /// Every widget the window's interface reports, in tree order, double
+    /// reports merged.
+    fn inventory(&mut self, id: window::Id) -> Vec<Node> {
+        let nodes = self
+            .with_ui(id, |ui, renderer, _| {
+                let mut selector = target::select.find_all();
+                ui.operate(renderer, &mut operation::black_box(&mut selector));
+                match selector.finish() {
+                    Outcome::Some(nodes) => nodes,
+                    _ => Vec::new(),
+                }
+            })
+            .unwrap_or_default();
         target::dedupe(nodes)
     }
 
     /// `ok X Y W H` of the widget that holds the keyboard focus, `err none` without one.
-    fn focused(&mut self) -> String {
-        let found = self.with_ui(|ui, renderer, _| {
-            let mut selector = iced_selector::is_focused().find();
-            ui.operate(renderer, &mut operation::black_box(&mut selector));
-            match selector.finish() {
-                Outcome::Some(found) => found,
-                _ => None,
-            }
-        });
+    fn focused(&mut self, id: window::Id) -> String {
+        let found = self
+            .with_ui(id, |ui, renderer, _| {
+                let mut selector = iced_selector::is_focused().find();
+                ui.operate(renderer, &mut operation::black_box(&mut selector));
+                match selector.finish() {
+                    Outcome::Some(found) => found,
+                    _ => None,
+                }
+            })
+            .flatten();
         match found {
             Some(found) => match found.visible_bounds() {
                 Some(b) => format!("ok {}", target::rect_words(b)),
@@ -1070,12 +1273,14 @@ where
     }
 
     /// Render, annotate, crop, zoom, write.
-    fn screenshot_command(&mut self, shot: Shot) -> String {
-        let scale = self.total_scale();
-        let mut frame = self.render();
+    fn screenshot_command(&mut self, id: window::Id, shot: Shot) -> String {
+        let scale = self.total_scale(id);
+        let Some(mut frame) = self.render(id) else {
+            return "err window closed".to_owned();
+        };
         let mut lines = Vec::new();
         if shot.annotate {
-            let nodes = self.inventory();
+            let nodes = self.inventory(id);
             let shown = target::filtered(&nodes, false);
             let mut boxes = Vec::new();
             for (i, node) in shown.iter().enumerate() {
@@ -1109,13 +1314,14 @@ where
         out
     }
 
-    /// Draws a frame with the current cursor and reads it back as RGBA.
-    fn render(&mut self) -> Frame {
-        let theme = self.theme();
+    /// Draws a frame of the window with its cursor and reads it back as
+    /// RGBA; `None` once the window is closed.
+    fn render(&mut self, id: window::Id) -> Option<Frame> {
+        let theme = self.theme(id);
         let style = self.program.style(&self.state, &theme);
-        let cursor = self.cursor;
+        let cursor = self.win(id)?.cursor;
         let mut messages = Vec::new();
-        self.with_ui(|ui, renderer, clipboard| {
+        self.with_ui(id, |ui, renderer, clipboard| {
             let _ = ui.update(
                 &[Event::Window(
                     window::Event::RedrawRequested(Instant::now()),
@@ -1133,22 +1339,22 @@ where
                 },
                 cursor,
             );
-        });
-        let physical = self.physical_size();
-        let scale = self.total_scale();
+        })?;
+        let physical = self.physical_size(id);
+        let scale = self.total_scale(id);
         let rgba =
             Headless::screenshot(&mut self.renderer, physical, scale, style.background_color);
         for message in messages {
             self.update(message);
         }
-        Frame {
+        Some(Frame {
             rgba,
             size: physical,
-        }
+        })
     }
 
     /// Starts ffmpeg on a raw RGBA stream of the frames `capture` renders.
-    fn record(&mut self, path: PathBuf) -> String {
+    fn record(&mut self, id: window::Id, path: PathBuf) -> String {
         if let Some(recording) = &self.recording {
             return format!("err already recording {}", recording.path.display());
         }
@@ -1159,7 +1365,7 @@ where
         {
             return format!("err no directory {}", dir.display());
         }
-        let size = self.physical_size();
+        let size = self.physical_size(id);
         let spawned = std::process::Command::new("ffmpeg")
             .args(["-loglevel", "error", "-y", "-f", "rawvideo"])
             .args(["-pixel_format", "rgba", "-video_size"])
@@ -1197,6 +1403,7 @@ where
             size.height
         );
         self.recording = Some(Recording {
+            window: id,
             path,
             started: Instant::now(),
             written: 0,
@@ -1212,14 +1419,18 @@ where
     /// capture missed, so the video keeps wall-clock time.
     fn capture(&mut self) {
         let now = Instant::now();
-        match &self.recording {
-            Some(recording) if now >= recording.next_frame() => {}
+        let id = match &self.recording {
+            Some(recording) if now >= recording.next_frame() => recording.window,
             _ => return,
-        }
-        let scale = self.total_scale();
-        let mut frame = self.render();
-        if let Some(at) = self.cursor.position() {
-            image::draw_pointer(&mut frame, at, scale, self.pressed);
+        };
+        let scale = self.total_scale(id);
+        let Some(mut frame) = self.render(id) else {
+            return;
+        };
+        if let Some(window) = self.win(id)
+            && let Some(at) = window.cursor.position()
+        {
+            image::draw_pointer(&mut frame, at, scale, window.pressed);
         }
         let Some(recording) = &mut self.recording else {
             return;
@@ -1283,63 +1494,154 @@ where
         }
     }
 
+    /// Runs a widget operation on every window's interface, as a windowed
+    /// run does.
     fn operate(&mut self, operation: Box<dyn Operation>) {
-        self.with_ui(|ui, renderer, _| {
-            let mut operation = Some(operation);
-            while let Some(mut current) = operation.take() {
-                ui.operate(renderer, &mut current);
-                if let Outcome::Chain(next) = current.finish() {
-                    operation = Some(next);
-                }
+        let ids: Vec<window::Id> = self.windows.iter().map(|w| w.id).collect();
+        let mut operation = Some(operation);
+        while let Some(mut current) = operation.take() {
+            for &id in &ids {
+                let _ = self.with_ui(id, |ui, renderer, _| ui.operate(renderer, &mut current));
             }
-        });
+            if let Outcome::Chain(next) = current.finish() {
+                operation = Some(next);
+            }
+        }
         // A focus or scroll changes what is drawn.
-        self.redraw = window::RedrawRequest::NextFrame;
+        for window in &mut self.windows {
+            window.redraw = window::RedrawRequest::NextFrame;
+        }
     }
 
     fn window_action(&mut self, action: iced_runtime::window::Action) {
         use iced_runtime::window::Action as Window;
+        // An unknown id drops the sender, as for a window that is gone.
         match action {
-            Window::Open(id, _, sender) => {
+            Window::Open(id, settings, sender) => {
+                let size = self.first_size.take().unwrap_or(settings.size);
+                self.windows
+                    .push(WindowState::new(id, settings, size, self.os_scale));
+                let size = self.ui_size(id);
+                self.deliver(
+                    id,
+                    vec![Event::Window(window::Event::Opened {
+                        position: None,
+                        size,
+                    })],
+                );
                 let _ = sender.send(id);
             }
-            Window::Close(_) => self.exit = Some(0),
-            Window::GetOldest(sender) | Window::GetLatest(sender) => {
-                let _ = sender.send(Some(self.window));
+            Window::Close(id) => self.close_window(id),
+            Window::GetOldest(sender) => {
+                let _ = sender.send(self.windows.first().map(|w| w.id));
             }
-            Window::GetSize(_, sender) => {
-                let _ = sender.send(self.ui_size());
+            Window::GetLatest(sender) => {
+                let _ = sender.send(self.windows.last().map(|w| w.id));
             }
-            Window::GetMaximized(_, sender) => {
-                let _ = sender.send(self.maximized);
+            Window::GetSize(id, sender) => {
+                if self.win(id).is_some() {
+                    let _ = sender.send(self.ui_size(id));
+                }
+            }
+            Window::GetMaximized(id, sender) => {
+                if let Some(window) = self.win(id) {
+                    let _ = sender.send(window.maximized);
+                }
+            }
+            Window::Resize(id, size) => {
+                let Some(window) = self.win_mut(id) else {
+                    return;
+                };
+                window.size = clamp(&window.settings, size);
+                let size = self.ui_size(id);
+                self.deliver(id, vec![Event::Window(window::Event::Resized(size))]);
             }
             // A window manager resizes a window it maximizes; the app hears
             // the resize and asks for the new state.
-            Window::ToggleMaximize(_) => {
-                self.maximized = !self.maximized;
-                let size = self.ui_size();
-                self.deliver(vec![Event::Window(window::Event::Resized(size))]);
+            Window::Maximize(id, maximized) => {
+                let Some(window) = self.win_mut(id) else {
+                    return;
+                };
+                window.maximized = maximized;
+                let size = self.ui_size(id);
+                self.deliver(id, vec![Event::Window(window::Event::Resized(size))]);
+            }
+            Window::ToggleMaximize(id) => {
+                let Some(window) = self.win_mut(id) else {
+                    return;
+                };
+                window.maximized = !window.maximized;
+                let size = self.ui_size(id);
+                self.deliver(id, vec![Event::Window(window::Event::Resized(size))]);
             }
             Window::GetMinimized(_, sender) => {
                 let _ = sender.send(None);
             }
-            Window::GetPosition(_, sender) => {
-                let _ = sender.send(Some(Point::ORIGIN));
+            Window::GetPosition(id, sender) => {
+                if self.win(id).is_some() {
+                    let _ = sender.send(Some(Point::ORIGIN));
+                }
             }
-            Window::GetScaleFactor(_, sender) => {
-                let _ = sender.send(self.os_scale);
+            Window::GetScaleFactor(id, sender) => {
+                if let Some(window) = self.win(id) {
+                    let _ = sender.send(window.os_scale);
+                }
             }
-            Window::GetMode(_, sender) => {
-                let _ = sender.send(window::Mode::Windowed);
+            Window::GetMode(id, sender) => {
+                if self.win(id).is_some() {
+                    let _ = sender.send(window::Mode::Windowed);
+                }
             }
-            Window::Screenshot(_, sender) => {
-                let scale = self.total_scale();
-                let frame = self.render();
-                let _ = sender.send(window::Screenshot::new(frame.rgba, frame.size, scale));
+            Window::Screenshot(id, sender) => {
+                let scale = self.total_scale(id);
+                if let Some(frame) = self.render(id) {
+                    let _ = sender.send(window::Screenshot::new(frame.rgba, frame.size, scale));
+                }
             }
             _ => eprintln!("[remote] ignored window action"),
         }
     }
+
+    /// Removes the window, tells the subscriptions, and answers what waited
+    /// on it. An application ends with its last window; a daemon only
+    /// through `iced::exit`.
+    fn close_window(&mut self, id: window::Id) {
+        let Some(i) = self.windows.iter().position(|w| w.id == id) else {
+            return;
+        };
+        self.windows.remove(i);
+        self.runtime.broadcast(subscription::Event::Interaction {
+            window: id,
+            event: Event::Window(window::Event::Closed),
+            status: event::Status::Ignored,
+        });
+        self.target_waiters.retain(|waiter| {
+            if waiter.window != id {
+                return true;
+            }
+            let _ = waiter.reply.send(window_closed(waiter.appear).to_owned());
+            false
+        });
+        if self.recording.as_ref().is_some_and(|r| r.window == id)
+            && let Some(recording) = self.recording.take()
+        {
+            let path = recording.path.clone();
+            eprintln!(
+                "[remote] recording {}: {}",
+                path.display(),
+                recording.finish()
+            );
+        }
+        if !self.daemon && self.windows.is_empty() {
+            self.exit = Some(0);
+        }
+    }
+}
+
+/// What a target waiter answers when its window closes: whatever it waited
+/// to vanish is gone, whatever it waited for never comes.
+fn window_closed(appear: bool) -> &'static str {
+    if appear { "err window closed" } else { "ok" }
 }
 
 /// The reply a target waiter gives now, or `None` while it keeps waiting.
@@ -1411,11 +1713,11 @@ impl Clipboard for MemoryClipboard {
 
 /// Has the loop answer one command line.
 fn answer<M>(line: &str, inputs: &mpsc::Sender<Input<M>>) -> String {
-    match Command::parse(line) {
+    match Request::parse(line) {
         Err(e) => format!("err {e}"),
-        Ok(command) => {
+        Ok(request) => {
             let (reply_tx, reply_rx) = mpsc::channel();
-            if inputs.send(Input::Control(command, reply_tx)).is_err() {
+            if inputs.send(Input::Control(request, reply_tx)).is_err() {
                 "err exiting".to_owned()
             } else {
                 reply_rx.recv().unwrap_or_else(|_| "err exiting".to_owned())
