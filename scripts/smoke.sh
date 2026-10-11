@@ -11,18 +11,21 @@ set -euo pipefail
 backend=${1:-tiny-skia}
 cd "$(dirname "$0")/.."
 target=${CARGO_TARGET_DIR:-target}
-cargo build -q --example demo --bin iced-impeccable
+cargo build -q --example demo --example multiwin --bin iced-impeccable
 
 dir=$(mktemp -d)
 if [[ ${OS:-} == Windows_NT ]]; then
     sock=iced-impeccable-smoke-$$
+    sock2=iced-impeccable-smoke-multiwin-$$
 else
     sock=$dir/demo.sock
+    sock2=$dir/multiwin.sock
 fi
 "$target/debug/examples/demo" --headless --control "$sock" --size 1100x720 --clipboard 'from start' \
     --backend "$backend" 2>"$dir/host.log" &
 host=$!
-trap 'kill "$host" 2>/dev/null || true; rm -rf "$dir"' EXIT
+host2=
+trap 'kill "$host" $host2 2>/dev/null || true; rm -rf "$dir"' EXIT
 
 failures=0
 # expect PATTERN COMMAND...: the reply's first line must match PATTERN.
@@ -79,6 +82,23 @@ sheet=$("$target/debug/iced-impeccable" sheet "$dir/sheet.png" "$dir/light.png" 
 [[ $sheet =~ ^ok\ .*/sheet.png\ [0-9]+x[0-9]+$ ]] && echo "ok    sheet" \
     || { echo "FAIL  sheet: $sheet"; failures=$((failures + 1)); }
 [[ ! -e $sock ]] || { echo "FAIL  socket left behind"; failures=$((failures + 1)); }
+
+# A daemon with two windows: `windows` lists them, `@N` addresses one.
+"$target/debug/examples/multiwin" --headless --control "$sock2" --size 640x480 \
+    --backend "$backend" 2>>"$dir/host.log" &
+host2=$!
+sock=$sock2
+expect "^ok 1$" windows
+expect "^ok" tap 'Open second'
+expect "^ok 2$" windows
+expect "^ok" @2 find second
+expect "^ok .* 320x240" @2 screenshot "$dir/second.png"
+expect "^ok" @2 tap Close
+expect "^ok 1$" windows
+expect "^err no window 2" @2 tree
+expect "^ok" quit
+wait "$host2" || { echo "FAIL  multiwin exit status $?"; failures=$((failures + 1)); }
+host2=
 
 if ((failures > 0)); then
     echo "$failures failure(s); host log:"
