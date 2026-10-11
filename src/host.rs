@@ -1548,11 +1548,14 @@ where
                     let _ = sender.send(window.maximized);
                 }
             }
+            // As in a windowed run, the size is in the interface's units: the app's scale
+            // factor applies on top of the OS scale.
             Window::Resize(id, size) => {
+                let app_scale = self.program.scale_factor(&self.state, id);
                 let Some(window) = self.win_mut(id) else {
                     return;
                 };
-                window.size = clamp(&window.settings, size);
+                window.size = clamp(&window.settings, size * app_scale);
                 let size = self.ui_size(id);
                 self.deliver(id, vec![Event::Window(window::Event::Resized(size))]);
             }
