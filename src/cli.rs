@@ -8,7 +8,7 @@ use crate::protocol;
 
 const SHEET_MAX_WIDTH: u32 = 2560;
 
-/// `ctl [--wait MS] [--keep-going] <socket> <command...>`; returns the exit
+/// `ctl [--wait MS] [--keep-going] [--window N] <socket> <command...>`; returns the exit
 /// code.
 pub fn ctl(args: &[String]) -> i32 {
     crate::client::run(args)

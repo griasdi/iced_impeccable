@@ -56,6 +56,13 @@ Lines starting with `#` and blank lines are skipped, so a batch can be commented
 - Files: `drop PATH` drags a file onto the window and drops it.
 - App-specific commands registered by the app (`Remote::command`) are listed under `custom:` in `help`.
 
+### Several windows
+
+- `windows` lists the open windows: `ok N`, then `INDEX WxH scale S title="TITLE"`, numbered from 1 in the order they opened.
+- Commands act on window 1, the oldest open window. Prefix a line with `@N ` for another: `@2 tree`, `@2 tap Close`, `@2 screenshot /tmp/<app>-shots/popup.png`. `ctl --window N` prefixes every line that has no `@N` of its own.
+- A closed or unknown window answers `err no window N (open: 1..M, see windows)`; `wait-gone` on a window that closes answers `ok`, `wait-for` `err window closed`.
+- `help`, `windows`, `clip`, `clip-set`, `appearance`, `wait-idle`, `record-stop`, `quit` and custom commands ignore `@N`.
+
 ### Waiting
 
 - After navigation or any asynchronous change: `wait-for [--timeout MS] TARGET` (default 5000; `err timeout` on failure) or `wait-gone`.

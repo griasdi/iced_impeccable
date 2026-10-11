@@ -1,6 +1,7 @@
-//! Headless remote control for iced 0.14 applications.
+//! Headless remote control for iced 0.14 applications and daemons.
 //!
-//! Wrap the `iced::application(...)` value in [`Remote`] (or call [`run`]):
+//! Wrap the `iced::application(...)` or `iced::daemon(...)` value in
+//! [`Remote`] (or call [`run`]):
 //!
 //! ```no_run
 //! # #[derive(Debug, Clone)]
@@ -19,12 +20,16 @@
 //!   [--appearance dark|light] [--backend wgpu|tiny-skia] [--clipboard TEXT]`
 //!   runs the app offscreen with a hardware renderer, controlled through a
 //!   Unix socket (on Windows a named pipe such as `myapp-agent-1`);
-//! - `<bin> ctl [--wait MS] [--keep-going] <socket> <command...>` sends one
+//! - `<bin> ctl [--wait MS] [--keep-going] [--window N] <socket> <command...>` sends one
 //!   command (or, with `-`, a batch from stdin) and prints the reply;
 //! - anything else runs the app in its window as usual.
 //!
 //! [`Remote::windowed`] and [`Remote::headless`] run setup for only one of
 //! the two app modes, such as a tray icon or stub devices.
+//!
+//! A daemon or an app with more windows has several pretend windows: `ctl`
+//! addresses window N with a leading `@N` on the command line or with
+//! `--window N`, and `windows` lists them.
 //!
 //! `<bin> ctl <socket> help` lists the protocol. The standalone
 //! `iced-impeccable` binary offers the same client plus contact sheets.
@@ -48,15 +53,15 @@ mod target;
 
 pub mod cli;
 
-pub use remote::Remote;
+pub use remote::{Remote, Runnable};
 
 static HEADLESS: AtomicBool = AtomicBool::new(false);
 
 /// `Remote::new(app).run()`.
-pub fn run<P>(app: iced::Application<P>) -> iced::Result
+pub fn run<A>(app: A) -> iced::Result
 where
-    P: iced::Program + 'static,
-    P::Message: MaybeDebug + MaybeClone,
+    A: Runnable,
+    A::Message: MaybeDebug + MaybeClone,
 {
     Remote::new(app).run()
 }

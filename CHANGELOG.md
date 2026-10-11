@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `Remote` and `run` accept an `iced::Daemon` as well as an
+  `iced::Application` (new trait `Runnable`). The host keeps every window the
+  program opens: `window::open`, `close`, `resize`, `maximize` and the window
+  queries act on the given window, and an application exits with its last
+  window, a daemon only through `iced::exit`.
+- `windows` command: `ok N`, then `INDEX WxH scale S title="TITLE"` per open
+  window. `info` ends with `windows N`.
+- A leading `@N ` addresses window N (1-based, in open order); without it a
+  command acts on the oldest open window. `ctl --window N` adds `@N ` to every
+  line without one.
+- `--clipboard TEXT` host flag: the clipboard's content at start.
+
+### Changed
+
+- `Remote<P>` is generic over the program (`Remote<A: Runnable>`) instead of
+  `Application<P>`'s inner program.
+
 ## [0.1.1] - 2026-10-02
 
 ### Added

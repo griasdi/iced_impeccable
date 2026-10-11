@@ -1,6 +1,6 @@
-//! `ctl [--wait MS] [--keep-going] <socket> <command...>`: one command line
-//! to a headless host, its reply on stdout; `-` instead of the command reads
-//! a batch from stdin.
+//! `ctl [--wait MS] [--keep-going] [--window N] <socket> <command...>`: one
+//! command line to a headless host, its reply on stdout; `-` instead of the
+//! command reads a batch from stdin.
 
 use std::io::{BufRead, ErrorKind};
 use std::path::{Path, PathBuf};
@@ -19,7 +19,9 @@ fn usage() -> String {
         .map(PathBuf::from)
         .and_then(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()))
         .unwrap_or_else(|| "iced-impeccable".to_owned());
-    format!("usage: {bin} ctl [--wait MS] [--keep-going] <socket> <command> [args...] | -")
+    format!(
+        "usage: {bin} ctl [--wait MS] [--keep-going] [--window N] <socket> <command> [args...] | -"
+    )
 }
 
 /// Exits 0 on `ok`, 1 on `err` or when the host cannot be reached, 2 on a
@@ -27,6 +29,7 @@ fn usage() -> String {
 pub(crate) fn run(args: &[String]) -> i32 {
     let mut wait = CONNECT_WAIT;
     let mut keep_going = false;
+    let mut window = None;
     let mut args = args;
     loop {
         match args {
@@ -37,6 +40,17 @@ pub(crate) fn run(args: &[String]) -> i32 {
                     return 2;
                 };
                 wait = Duration::from_millis(ms);
+                args = rest;
+            }
+            [flag, n, rest @ ..] if flag == "--window" => {
+                match n.parse::<usize>() {
+                    Ok(n) if n >= 1 => window = Some(n),
+                    _ => {
+                        eprintln!("--window {n:?} is not a window number (1, 2, ...)");
+                        eprintln!("{}", usage());
+                        return 2;
+                    }
+                }
                 args = rest;
             }
             [flag, rest @ ..] if flag == "--keep-going" => {
@@ -56,9 +70,9 @@ pub(crate) fn run(args: &[String]) -> i32 {
             eprintln!("{}", usage());
             2
         }
-        [dash] if dash == "-" => batch(socket, wait, keep_going),
+        [dash] if dash == "-" => batch(socket, wait, keep_going, window),
         _ => {
-            if send(socket, &words.join(" "), wait) {
+            if send(socket, &select(&words.join(" "), window), wait) {
                 0
             } else {
                 1
@@ -69,7 +83,7 @@ pub(crate) fn run(args: &[String]) -> i32 {
 
 /// Runs stdin line by line, one connection each, stopping at the first
 /// `err` unless `keep_going`.
-fn batch(socket: &Path, wait: Duration, keep_going: bool) -> i32 {
+fn batch(socket: &Path, wait: Duration, keep_going: bool, window: Option<usize>) -> i32 {
     let mut input = String::new();
     for line in std::io::stdin().lock().lines() {
         match line {
@@ -85,7 +99,7 @@ fn batch(socket: &Path, wait: Duration, keep_going: bool) -> i32 {
     }
     let mut failed = false;
     for (n, line) in batch_lines(&input) {
-        if !send(socket, line, wait) {
+        if !send(socket, &select(line, window), wait) {
             eprintln!("line {n}: {line}");
             if !keep_going {
                 return 1;
@@ -145,9 +159,24 @@ fn connect(socket: &Path, wait: Duration) -> std::io::Result<channel::Connection
     }
 }
 
+/// `line` addressed to `--window N` unless it names a window itself.
+fn select(line: &str, window: Option<usize>) -> String {
+    match window {
+        Some(n) if !line.starts_with('@') => format!("@{n} {line}"),
+        _ => line.to_owned(),
+    }
+}
+
 /// A relative `screenshot`, `record` or `drop` path resolved against this
-/// process's working directory, not the host's.
+/// process's working directory, not the host's. A leading `@N` stays.
 fn absolute_paths(line: &str) -> std::io::Result<String> {
+    if line.starts_with('@') {
+        let (selector, command) = line.split_once(' ').unwrap_or((line, ""));
+        return Ok(format!(
+            "{selector} {}",
+            absolute_paths(command.trim_start())?
+        ));
+    }
     let (name, rest) = line.split_once(' ').unwrap_or((line, ""));
     let (prefix, path) = match name {
         "record" | "drop" => ("", rest.trim_start()),
@@ -201,5 +230,21 @@ mod tests {
         let absolute = format!("screenshot {}", cwd.join("x.png").display());
         assert_eq!(absolute_paths(&absolute).unwrap(), absolute);
         assert_eq!(absolute_paths("tap Save").unwrap(), "tap Save");
+    }
+
+    #[test]
+    fn a_window_selector_stays_in_front_of_the_absolute_path() {
+        let cwd = std::env::current_dir().unwrap();
+        assert_eq!(
+            absolute_paths("@2 screenshot out.png").unwrap(),
+            format!("@2 screenshot {}", cwd.join("out.png").display())
+        );
+    }
+
+    #[test]
+    fn the_window_flag_addresses_lines_without_their_own_selector() {
+        assert_eq!(select("tree", Some(2)), "@2 tree");
+        assert_eq!(select("@3 tree", Some(2)), "@3 tree");
+        assert_eq!(select("tree", None), "tree");
     }
 }

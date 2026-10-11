@@ -46,6 +46,9 @@ path = "src/bin/iced-impeccable.rs"
 [[example]]
 name = "demo"
 
+[[example]]
+name = "multiwin"
+
 [lints.rust]
 unsafe_code = "forbid"
 

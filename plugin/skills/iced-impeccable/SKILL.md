@@ -59,7 +59,7 @@ Run when the user passes `integrate`, and whenever the target app does not yet s
    remote = ["dep:iced_impeccable"]
    ```
    When a local checkout of iced_impeccable exists next to the app's repository, a `path` dependency on it works the same and picks up unreleased changes. The `iced-impeccable` binary comes from `cargo install iced_impeccable --bin iced-impeccable --locked`.
-2. Wrap `main`: build the `iced::application(...)` value, then
+2. Wrap `main`: build the `iced::application(...)` or `iced::daemon(...)` value, then
    ```rust
    #[cfg(feature = "remote")]
    return iced_impeccable::Remote::new(app)
