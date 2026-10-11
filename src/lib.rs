@@ -19,7 +19,7 @@
 //!   [--appearance dark|light] [--backend wgpu|tiny-skia] [--clipboard TEXT]`
 //!   runs the app offscreen with a hardware renderer, controlled through a
 //!   Unix socket (on Windows a named pipe such as `myapp-agent-1`);
-//! - `<bin> ctl [--wait MS] [--keep-going] <socket> <command...>` sends one
+//! - `<bin> ctl [--wait MS] [--keep-going] [--window N] <socket> <command...>` sends one
 //!   command (or, with `-`, a batch from stdin) and prints the reply;
 //! - anything else runs the app in its window as usual.
 //!

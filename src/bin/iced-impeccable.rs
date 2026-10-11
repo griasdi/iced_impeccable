@@ -1,7 +1,7 @@
 //! `iced-impeccable ctl ...`, `iced-impeccable sheet ...`, `iced-impeccable help`.
 
 const USAGE: &str =
-    "usage: iced-impeccable ctl [--wait MS] [--keep-going] <socket> <command> [args...] | -
+    "usage: iced-impeccable ctl [--wait MS] [--keep-going] [--window N] <socket> <command> [args...] | -
        iced-impeccable sheet [--cols N] [--labels a,b,c] [--max-width PX] OUT.png IN.png...
        iced-impeccable help";
 

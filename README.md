@@ -78,7 +78,7 @@ quit
 EOF
 ```
 
-`ctl [--wait MS] [--keep-going] <socket> <command...>` retries the connection
+`ctl [--wait MS] [--keep-going] [--window N] <socket> <command...>` retries the connection
 for up to 5 s (no sleep after starting the host), prints the reply, and exits
 0 on `ok`, 1 on `err`, 2 on bad usage. With `-` it reads a batch from stdin
 (blank lines and `#` comments skipped) and stops at the first `err` unless
