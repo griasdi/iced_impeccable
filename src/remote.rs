@@ -1,35 +1,60 @@
-//! The builder an app wraps its `iced::Application` in, and the argv
+//! The builder an app wraps its `iced::Application` or `iced::Daemon` in, and the argv
 //! dispatch between the windowed app, the headless host and `ctl`.
 
 use std::ffi::OsString;
 use std::path::Path;
 
 use iced::message::{MaybeClone, MaybeDebug};
-use iced::{Application, Program};
+use iced::{Application, Daemon, Program};
 
 use crate::args::{self, HostArgs};
 use crate::host::{self, Custom, Heartbeat, Hooks};
 use crate::protocol;
+
+/// An iced program that runs in its own windows: an `iced::Application` or
+/// an `iced::Daemon`.
+pub trait Runnable: Program + 'static {
+    /// Runs the program in its windows, as its own `run` does.
+    fn run(self) -> iced::Result;
+}
+
+impl<P: Program + 'static> Runnable for Application<P>
+where
+    P::Message: MaybeDebug + MaybeClone,
+{
+    fn run(self) -> iced::Result {
+        Application::run(self)
+    }
+}
+
+impl<P: Program + 'static> Runnable for Daemon<P>
+where
+    P::Message: MaybeDebug + MaybeClone,
+{
+    fn run(self) -> iced::Result {
+        Daemon::run(self)
+    }
+}
 
 /// An app that can also run headless under remote control.
 ///
 /// `Remote::run` looks at the command line: `<bin> ctl ...` runs the
 /// control client, `--headless --control <socket>` runs the app offscreen
 /// behind a control socket, anything else runs the app in its window.
-pub struct Remote<P: Program> {
-    app: Application<P>,
-    heartbeat: Heartbeat<P::Message>,
-    commands: Vec<Custom<P::Message>>,
+pub struct Remote<A: Runnable> {
+    app: A,
+    heartbeat: Heartbeat<A::Message>,
+    commands: Vec<Custom<A::Message>>,
     windowed: Option<Box<dyn FnOnce()>>,
     headless: Option<Box<dyn FnOnce()>>,
 }
 
-impl<P> Remote<P>
+impl<A> Remote<A>
 where
-    P: Program + 'static,
-    P::Message: MaybeDebug + MaybeClone,
+    A: Runnable,
+    A::Message: MaybeDebug + MaybeClone,
 {
-    pub fn new(app: Application<P>) -> Self {
+    pub fn new(app: A) -> Self {
         Self {
             app,
             heartbeat: Box::new(|_| false),
@@ -41,7 +66,7 @@ where
 
     /// Marks periodic messages (`time::every`, `window::frames`) that mean
     /// "time passed", so `wait-idle` does not count them as activity.
-    pub fn heartbeat(self, is_heartbeat: impl Fn(&P::Message) -> bool + 'static) -> Self {
+    pub fn heartbeat(self, is_heartbeat: impl Fn(&A::Message) -> bool + 'static) -> Self {
         Self {
             heartbeat: Box::new(is_heartbeat),
             ..self
@@ -81,7 +106,7 @@ where
         mut self,
         name: &'static str,
         summary: &'static str,
-        build: impl Fn(&str) -> Result<P::Message, String> + 'static,
+        build: impl Fn(&str) -> Result<A::Message, String> + 'static,
     ) -> Self {
         assert!(
             !protocol::is_builtin(name),
@@ -132,6 +157,6 @@ where
         if let Some(setup) = self.windowed {
             setup();
         }
-        self.app.run()
+        Runnable::run(self.app)
     }
 }

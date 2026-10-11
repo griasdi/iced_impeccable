@@ -48,15 +48,15 @@ mod target;
 
 pub mod cli;
 
-pub use remote::Remote;
+pub use remote::{Remote, Runnable};
 
 static HEADLESS: AtomicBool = AtomicBool::new(false);
 
 /// `Remote::new(app).run()`.
-pub fn run<P>(app: iced::Application<P>) -> iced::Result
+pub fn run<A>(app: A) -> iced::Result
 where
-    P: iced::Program + 'static,
-    P::Message: MaybeDebug + MaybeClone,
+    A: Runnable,
+    A::Message: MaybeDebug + MaybeClone,
 {
     Remote::new(app).run()
 }
