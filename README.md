@@ -28,7 +28,7 @@ node lines `tree` prints, so an agent clicks `tap #settings` or
 
 ```toml
 [dependencies]
-iced_impeccable = { version = "0.1", optional = true }
+iced_impeccable = { version = "0.2", optional = true }
 
 [features]
 remote = ["dep:iced_impeccable"]

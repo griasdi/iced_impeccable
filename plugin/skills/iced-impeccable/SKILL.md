@@ -1,7 +1,7 @@
 ---
 name: iced-impeccable
 description: Use when designing, redesigning, critiquing, auditing, polishing or otherwise improving the UI of an iced (Rust) desktop app, or when visually verifying an iced app headless (start it offscreen, inject keyboard and mouse input, take screenshots). Companion to the impeccable skill: same commands and design doctrine, with iced-native platform guidance and headless verification instead of a browser.
-version: 0.1.1
+version: 0.2.0
 user-invocable: true
 argument-hint: "[impeccable command] [target] | verify | integrate"
 license: MIT OR Apache-2.0
@@ -53,7 +53,7 @@ Run when the user passes `integrate`, and whenever the target app does not yet s
 1. `Cargo.toml` of the app:
    ```toml
    [dependencies]
-   iced_impeccable = { version = "0.1", optional = true }
+   iced_impeccable = { version = "0.2", optional = true }
 
    [features]
    remote = ["dep:iced_impeccable"]
