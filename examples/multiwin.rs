@@ -15,6 +15,8 @@ fn main() -> iced::Result {
 struct State {
     main: Option<window::Id>,
     second: Option<window::Id>,
+    /// The window that last gained focus and has not lost it.
+    focused: Option<window::Id>,
 }
 
 #[derive(Debug, Clone)]
@@ -25,6 +27,7 @@ enum Message {
     Close(window::Id),
     CloseRequested(window::Id),
     Closed(window::Id),
+    Focus(window::Id, bool),
 }
 
 fn boot() -> (State, Task<Message>) {
@@ -63,6 +66,17 @@ fn update(state: &mut State, message: Message) -> Task<Message> {
             }
             Task::none()
         }
+        Message::Focus(id, true) => {
+            state.focused = Some(id);
+            Task::none()
+        }
+        // The window that lost focus only clears it if it still held it.
+        Message::Focus(id, false) => {
+            if state.focused == Some(id) {
+                state.focused = None;
+            }
+            Task::none()
+        }
     }
 }
 
@@ -72,6 +86,10 @@ fn view(state: &State, id: window::Id) -> Element<'_, Message> {
     } else {
         column![
             text("main"),
+            text(format!(
+                "main focused: {}",
+                state.focused.is_some() && state.focused == state.main
+            )),
             button("Open second").on_press(Message::OpenSecond)
         ]
     }
@@ -92,5 +110,10 @@ fn subscription(_: &State) -> Subscription<Message> {
     Subscription::batch([
         window::close_requests().map(Message::CloseRequested),
         window::close_events().map(Message::Closed),
+        iced::event::listen_with(|event, _, id| match event {
+            iced::Event::Window(window::Event::Focused) => Some(Message::Focus(id, true)),
+            iced::Event::Window(window::Event::Unfocused) => Some(Message::Focus(id, false)),
+            _ => None,
+        }),
     ])
 }

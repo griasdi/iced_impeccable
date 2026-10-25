@@ -77,6 +77,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   instead of halving every image until the widest fits: images of different
   sizes (a 1x and a 2x capture) now come out at the same width, and a
   narrower image keeps its size.
+- `wait-idle` waits for the app's running tasks: `ok idle` and `ok animating`
+  are held back while a task started within the last 5 s has not ended (a
+  `Task::perform` that sleeps, a request), so a command that starts one is
+  no longer answered before its result arrives. A redraw or relayout request
+  from the app no longer counts as activity.
+- Input commands settle on activity only: a heartbeat (a clock tick, a
+  frame message) no longer keeps them waiting out the full 250 ms.
+- Window actions: `monitor_size` reports the window's size, `GainFocus`,
+  `set_min_size` and `set_max_size` work (a window is clamped to a new limit
+  and the app hears the resize), `window::raw_id` returns the id, and an
+  action the host does not implement is logged by name.
+- Windows take part in keyboard focus: a window the host opens gets
+  `Focused`, the one that had focus `Unfocused`, and closing the focused
+  window focuses the newest remaining one.
 
 ### Changed
 

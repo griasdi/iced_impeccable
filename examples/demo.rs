@@ -39,6 +39,10 @@ enum Message {
     Dropped(PathBuf),
     Mods(Modifiers),
     Hotkey,
+    Slept,
+    Sleep,
+    Monitor,
+    MonitorSize(Option<iced::Size>),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -121,6 +125,24 @@ impl Demo {
             }
             Message::Mods(modifiers) => self.mods = modifiers,
             Message::Hotkey => self.status = Some("Hotkey".into()),
+            Message::Slept => self.status = Some("Slept".into()),
+            Message::Sleep => {
+                return Task::perform(
+                    async { std::thread::sleep(Duration::from_millis(1500)) },
+                    |()| Message::Slept,
+                );
+            }
+            Message::Monitor => {
+                return iced::window::oldest()
+                    .and_then(iced::window::monitor_size)
+                    .map(Message::MonitorSize);
+            }
+            Message::MonitorSize(size) => {
+                self.status = Some(match size {
+                    Some(size) => format!("Monitor {}x{}", size.width as u32, size.height as u32),
+                    None => "Monitor unknown".to_owned(),
+                });
+            }
             Message::Dropped(path) => {
                 let name = path.file_name().map_or_else(
                     || path.display().to_string(),
@@ -166,6 +188,8 @@ impl Demo {
                 button(text("Save")).on_press(Message::Save),
                 button(text("Copy")).on_press(Message::Copy),
                 button(text("Spinner")).on_press(Message::ToggleSpinner),
+                button(text("Sleep")).on_press(Message::Sleep),
+                button(text("Monitor")).on_press(Message::Monitor),
             ]
             .spacing(8),
         ]
@@ -176,7 +200,7 @@ impl Demo {
                 .map(|_| progress_bar(0.0..=1.0, self.phase).length(240)),
         )
         .spacing(12)
-        .width(360);
+        .width(400);
 
         let rows = scrollable(
             column((1..=60).map(|i| text(format!("Row {i}")).into()))

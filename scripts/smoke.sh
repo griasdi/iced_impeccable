@@ -92,6 +92,12 @@ expect "^ok [0-9]+ [0-9]+$" tap Spinner
 expect "^ok animating$" wait-idle
 expect "^err timeout$" wait-idle --timeout 300
 expect "^ok [0-9]+ [0-9]+$" tap Spinner
+# A task that sleeps 1.5 s: wait-idle must wait for it, so no wait-for here.
+expect "^ok [0-9]+ [0-9]+$" tap Sleep
+expect "^ok idle$" wait-idle
+expect "^ok [0-9]+ [0-9]+ [0-9]+ [0-9]+$" find Slept
+expect "^ok [0-9]+ [0-9]+$" tap Monitor
+expect "^ok [0-9]+ [0-9]+ [0-9]+ [0-9]+$" wait-for 'Monitor 1100x720'
 expect "^ok$" key left
 expect '^err unknown key "nokey"; keys: ' key nokey
 expect "^ok$" reset
@@ -208,11 +214,14 @@ fi
 host2=$!
 sock=$sock2
 expect "^ok 1$" windows
+expect "^ok" wait-for 'main focused: true'
 expect "^ok" tap 'Open second'
+expect "^ok" wait-for 'main focused: false'
 expect "^ok 2$" windows
 expect "^ok" @2 find second
 expect "^ok .* 320x240" @2 screenshot "$dir/second.png"
 expect "^ok" @2 tap Close
+expect "^ok" wait-for 'main focused: true'
 expect "^ok 1$" windows
 expect "^err no window 2" @2 tree
 expect "^ok" quit

@@ -9,7 +9,7 @@
 //! `--no-pointer`), but without a pointer sprite; a recording additionally
 //! paints the pointer.
 
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::io::{Read, Write};
 use std::path::PathBuf;
 use std::process::{Child, Stdio};
@@ -49,6 +49,9 @@ const SETTLE_MAX: Duration = Duration::from_millis(250);
 /// How long only redraws may keep `wait-idle` busy before it answers
 /// `ok animating`.
 const ANIMATING_AFTER: Duration = Duration::from_secs(1);
+/// How long a running task keeps `wait-idle` from answering `ok idle` or
+/// `ok animating`; a task that runs longer, or never ends, stops counting.
+const TASK_BUSY_MAX: Duration = Duration::from_secs(5);
 /// How long after an update the interface still counts as redrawing: a
 /// `window::frames()` loop answers each frame with a message, and between the
 /// frame and that message no redraw is pending.
@@ -98,6 +101,8 @@ type HostRuntime<A> = Runtime<
 enum HostEvent<M> {
     Message(M),
     Action(Action<M>),
+    /// The task spawned under this number has ended.
+    TaskDone(u64),
 }
 
 /// Everything the loop waits on.
@@ -230,6 +235,11 @@ struct Host<A: Program> {
     recording: Option<Recording>,
     /// The modifiers `keydown` holds, until `keyup` releases them.
     held: Modifiers,
+    /// The tasks that have not ended, by number, with when they started.
+    tasks: HashMap<u64, Instant>,
+    next_task: u64,
+    /// The window that has the pretend keyboard focus.
+    focused: Option<window::Id>,
 }
 
 /// One pretend window.
@@ -457,6 +467,9 @@ where
             exit: None,
             recording: None,
             held: Modifiers::empty(),
+            tasks: HashMap::new(),
+            next_task: 0,
+            focused: None,
         };
         // An application's window exists before it boots; a daemon opens its
         // own through `window::open`.
@@ -479,6 +492,7 @@ where
                     size,
                 })],
             );
+            host.focus(id);
         }
         host
     }
@@ -587,7 +601,9 @@ where
                 },
             };
             match input {
-                Some(Input::Host(event)) => self.host_event(event),
+                Some(Input::Host(event)) => {
+                    self.host_event(event);
+                }
                 Some(Input::Control(request, reply)) => self.control(request, reply),
                 None => {}
             }
@@ -643,19 +659,32 @@ where
         }
     }
 
-    fn host_event(&mut self, event: HostEvent<A::Message>) {
+    /// Handles what the executor handed back; `true` when it counts as
+    /// activity: not a heartbeat message, not a redraw or relayout request,
+    /// not a task ending.
+    fn host_event(&mut self, event: HostEvent<A::Message>) -> bool {
+        let active = match &event {
+            HostEvent::Message(message) => !(self.hooks.heartbeat)(message),
+            HostEvent::Action(action) => !matches!(
+                action,
+                Action::Window(
+                    iced_runtime::window::Action::RedrawAll
+                        | iced_runtime::window::Action::RelayoutAll
+                )
+            ),
+            HostEvent::TaskDone(_) => false,
+        };
+        if active {
+            self.last_activity = Instant::now();
+        }
         match event {
-            HostEvent::Message(message) => {
-                if !(self.hooks.heartbeat)(&message) {
-                    self.last_activity = Instant::now();
-                }
-                self.update(message);
-            }
-            HostEvent::Action(action) => {
-                self.last_activity = Instant::now();
-                self.perform(action);
+            HostEvent::Message(message) => self.update(message),
+            HostEvent::Action(action) => self.perform(action),
+            HostEvent::TaskDone(id) => {
+                self.tasks.remove(&id);
             }
         }
+        active
     }
 
     /// Runs the app's `update`, starts the task it returns, resubscribes,
@@ -674,7 +703,12 @@ where
 
     fn spawn(&mut self, task: Task<A::Message>) {
         if let Some(stream) = task::into_stream(task) {
-            self.runtime.run(stream.map(HostEvent::Action).boxed());
+            let id = self.next_task;
+            self.next_task += 1;
+            self.tasks.insert(id, Instant::now());
+            let done = iced_futures::futures::stream::iter([HostEvent::TaskDone(id)]);
+            self.runtime
+                .run(stream.map(HostEvent::Action).chain(done).boxed());
         }
     }
 
@@ -785,16 +819,22 @@ where
             .min();
         let idle = self.idle_waiters.iter().flat_map(|w| {
             let quiet_at = self.last_activity.max(w.since) + w.quiet;
-            let give_up = w.since + w.quiet + w.timeout;
+            // Only instants still ahead: one that has passed and did not
+            // answer the waiter would make the loop spin.
             [
-                (quiet_at > now).then_some(quiet_at),
-                (self.last_update + UPDATE_GAP > now).then_some(self.last_update + UPDATE_GAP),
-                Some(quiet_at + ANIMATING_AFTER),
-                Some(give_up),
+                quiet_at,
+                self.last_update + UPDATE_GAP,
+                quiet_at + ANIMATING_AFTER,
+                w.since + w.quiet + w.timeout,
             ]
             .into_iter()
-            .flatten()
+            .filter(move |at| *at > now)
         });
+        let tasks = if self.idle_waiters.is_empty() {
+            None
+        } else {
+            tasks_busy_until(&self.tasks, now)
+        };
         let check =
             (!self.target_waiters.is_empty()).then_some(self.last_target_check + TARGET_POLL);
         let deadlines = self.target_waiters.iter().map(|w| w.deadline);
@@ -808,28 +848,31 @@ where
             .chain(capture)
             .chain(idle)
             .chain(check)
+            .chain(tasks)
             .chain(deadlines)
             .chain(self.quit_deadline)
             .min()
             .map(|at| at.saturating_duration_since(now))
     }
 
-    /// `ok idle` once nothing but heartbeats happened for the quiet time and
-    /// no frame is pending; `ok animating` when only redraws kept it busy for
-    /// another second; `err timeout` once the timeout has passed on top of
-    /// the quiet time, with real activity in between.
+    /// `ok idle` once nothing but heartbeats happened for the quiet time, no
+    /// frame is pending and no task is running; `ok animating` when only
+    /// redraws kept it busy for another second; `err timeout` once the
+    /// timeout has passed on top of the quiet time, with real activity in
+    /// between.
     fn answer_idle_waiters(&mut self) {
         if self.idle_waiters.is_empty() {
             return;
         }
         let now = Instant::now();
         let redraw_due = self.redraw_due(now) || now < self.last_update + UPDATE_GAP;
+        let busy = tasks_busy(&self.tasks, now);
         let last_activity = self.last_activity;
         self.idle_waiters.retain(|waiter| {
             let quiet_at = last_activity.max(waiter.since) + waiter.quiet;
-            let answer = if now >= quiet_at && !redraw_due {
+            let answer = if now >= quiet_at && !redraw_due && !busy {
                 "ok idle"
-            } else if now >= quiet_at + ANIMATING_AFTER {
+            } else if now >= quiet_at + ANIMATING_AFTER && !busy {
                 "ok animating"
             } else if now >= waiter.since + waiter.quiet + waiter.timeout {
                 "err timeout"
@@ -1315,11 +1358,25 @@ where
         "ok".to_owned()
     }
 
+    /// Runs the loop until it has been quiet for `SETTLE`, at most
+    /// `SETTLE_MAX`. Only activity extends the quiet time: heartbeats, redraws
+    /// and control commands (which are queued) do not.
     fn settle(&mut self) {
         let start = Instant::now();
-        while self.exit.is_none() && start.elapsed() < SETTLE_MAX {
-            match self.inputs.recv_timeout(SETTLE) {
-                Ok(Input::Host(event)) => self.host_event(event),
+        let end = start + SETTLE_MAX;
+        let mut quiet_until = start + SETTLE;
+        while self.exit.is_none() {
+            let now = Instant::now();
+            let until = quiet_until.min(end);
+            if now >= until {
+                break;
+            }
+            match self.inputs.recv_timeout(until - now) {
+                Ok(Input::Host(event)) => {
+                    if self.host_event(event) {
+                        quiet_until = Instant::now() + SETTLE;
+                    }
+                }
                 Ok(Input::Control(request, reply)) => self.queued.push_back((request, reply)),
                 Err(_) => break,
             }
@@ -1340,7 +1397,9 @@ where
                 .wakeup()
                 .map_or(until - now, |after| after.min(until - now));
             match self.inputs.recv_timeout(wait) {
-                Ok(Input::Host(event)) => self.host_event(event),
+                Ok(Input::Host(event)) => {
+                    self.host_event(event);
+                }
                 Ok(Input::Control(request, reply)) => self.queued.push_back((request, reply)),
                 Err(mpsc::RecvTimeoutError::Timeout) => {}
                 Err(mpsc::RecvTimeoutError::Disconnected) => break,
@@ -1668,6 +1727,7 @@ where
                         size,
                     })],
                 );
+                self.focus(id);
                 let _ = sender.send(id);
             }
             Window::Close(id) => self.close_window(id),
@@ -1687,6 +1747,19 @@ where
                     let _ = sender.send(window.maximized);
                 }
             }
+            Window::GetMonitorSize(id, sender) => {
+                if self.win(id).is_some() {
+                    let _ = sender.send(Some(self.ui_size(id)));
+                }
+            }
+            Window::GetRawId(id, sender) => {
+                if self.win(id).is_some() {
+                    let _ = sender.send(id.to_string().parse().unwrap_or(0));
+                }
+            }
+            Window::SetMinSize(id, size) => self.set_limit(id, size, true),
+            Window::SetMaxSize(id, size) => self.set_limit(id, size, false),
+            Window::GainFocus(id) => self.focus(id),
             // As in a windowed run, the size is in the interface's units: the app's scale
             // factor applies on top of the OS scale.
             Window::Resize(id, size) => {
@@ -1740,7 +1813,47 @@ where
                     let _ = sender.send(window::Screenshot::new(frame.rgba, frame.size, scale));
                 }
             }
-            _ => eprintln!("[remote] ignored window action"),
+            action => eprintln!(
+                "[remote] ignored window action {}",
+                window_action_name(&action)
+            ),
+        }
+    }
+
+    /// Gives `id` the pretend keyboard focus: the window that had it hears
+    /// `Unfocused`, `id` hears `Focused`. Nothing happens when `id` already
+    /// has it or is gone.
+    fn focus(&mut self, id: window::Id) {
+        if self.focused == Some(id) || self.win(id).is_none() {
+            return;
+        }
+        if let Some(previous) = self.focused.take() {
+            self.deliver(previous, vec![Event::Window(window::Event::Unfocused)]);
+        }
+        self.focused = Some(id);
+        self.deliver(id, vec![Event::Window(window::Event::Focused)]);
+    }
+
+    /// `SetMinSize` or `SetMaxSize`: like `Resize`, the size is in the
+    /// interface's units, so the app's scale factor applies on top of the OS
+    /// scale. The window is clamped to the new limit, and the app hears a
+    /// resize only if that changed it.
+    fn set_limit(&mut self, id: window::Id, size: Option<Size>, min: bool) {
+        let app_scale = self.program.scale_factor(&self.state, id);
+        let Some(window) = self.win_mut(id) else {
+            return;
+        };
+        let limit = size.map(|size| size * app_scale);
+        if min {
+            window.settings.min_size = limit;
+        } else {
+            window.settings.max_size = limit;
+        }
+        let before = window.size;
+        window.size = clamp(&window.settings, before);
+        if window.size != before {
+            let size = self.ui_size(id);
+            self.deliver(id, vec![Event::Window(window::Event::Resized(size))]);
         }
     }
 
@@ -1752,6 +1865,12 @@ where
             return;
         };
         self.windows.remove(i);
+        if self.focused == Some(id) {
+            self.focused = None;
+            if let Some(last) = self.windows.last().map(|w| w.id) {
+                self.focus(last);
+            }
+        }
         self.runtime.broadcast(subscription::Event::Interaction {
             window: id,
             event: Event::Window(window::Event::Closed),
@@ -1778,6 +1897,68 @@ where
             self.exit = Some(0);
         }
     }
+}
+
+/// The name of a window action, for the log: `Action` has no `Debug`.
+fn window_action_name(action: &iced_runtime::window::Action) -> &'static str {
+    use iced_runtime::window::Action as Window;
+    // A later iced may add variants.
+    #[allow(unreachable_patterns)]
+    match action {
+        Window::Open(..) => "Open",
+        Window::Close(_) => "Close",
+        Window::GetOldest(_) => "GetOldest",
+        Window::GetLatest(_) => "GetLatest",
+        Window::Drag(_) => "Drag",
+        Window::DragResize(..) => "DragResize",
+        Window::Resize(..) => "Resize",
+        Window::GetSize(..) => "GetSize",
+        Window::GetMaximized(..) => "GetMaximized",
+        Window::Maximize(..) => "Maximize",
+        Window::GetMinimized(..) => "GetMinimized",
+        Window::Minimize(..) => "Minimize",
+        Window::GetPosition(..) => "GetPosition",
+        Window::GetScaleFactor(..) => "GetScaleFactor",
+        Window::Move(..) => "Move",
+        Window::SetMode(..) => "SetMode",
+        Window::GetMode(..) => "GetMode",
+        Window::ToggleMaximize(_) => "ToggleMaximize",
+        Window::ToggleDecorations(_) => "ToggleDecorations",
+        Window::RequestUserAttention(..) => "RequestUserAttention",
+        Window::GainFocus(_) => "GainFocus",
+        Window::SetLevel(..) => "SetLevel",
+        Window::ShowSystemMenu(_) => "ShowSystemMenu",
+        Window::GetRawId(..) => "GetRawId",
+        Window::SetIcon(..) => "SetIcon",
+        Window::Run(..) => "Run",
+        Window::Screenshot(..) => "Screenshot",
+        Window::EnableMousePassthrough(_) => "EnableMousePassthrough",
+        Window::DisableMousePassthrough(_) => "DisableMousePassthrough",
+        Window::SetMinSize(..) => "SetMinSize",
+        Window::SetMaxSize(..) => "SetMaxSize",
+        Window::SetResizable(..) => "SetResizable",
+        Window::SetResizeIncrements(..) => "SetResizeIncrements",
+        Window::GetMonitorSize(..) => "GetMonitorSize",
+        Window::SetAllowAutomaticTabbing(_) => "SetAllowAutomaticTabbing",
+        Window::RedrawAll => "RedrawAll",
+        Window::RelayoutAll => "RelayoutAll",
+        _ => "unknown",
+    }
+}
+
+/// Whether a task started within `TASK_BUSY_MAX` of `now` is still running.
+fn tasks_busy(tasks: &HashMap<u64, Instant>, now: Instant) -> bool {
+    tasks_busy_until(tasks, now).is_some()
+}
+
+/// When the last task that counts as running stops counting, or `None` if
+/// none does.
+fn tasks_busy_until(tasks: &HashMap<u64, Instant>, now: Instant) -> Option<Instant> {
+    tasks
+        .values()
+        .map(|&started| started + TASK_BUSY_MAX)
+        .filter(|&until| until > now)
+        .max()
 }
 
 /// What a target waiter answers when its window closes: whatever it waited
@@ -1891,6 +2072,49 @@ mod tests {
             Some("err zoom too large: 17600x11520")
         );
         assert_eq!(zoom_too_large(Size::new(8192, 8192), 1), None);
+    }
+
+    #[test]
+    fn young_tasks_keep_idle_busy_old_ones_do_not() {
+        let t0 = Instant::now();
+        let at = |s| t0 + Duration::from_secs(s);
+        let mut tasks = HashMap::new();
+        assert!(!tasks_busy(&tasks, t0));
+        tasks.insert(1, t0);
+        assert!(tasks_busy(&tasks, at(1)));
+        assert!(!tasks_busy(&tasks, at(6)));
+        assert_eq!(tasks_busy_until(&tasks, at(6)), None);
+        tasks.insert(2, at(3));
+        assert!(tasks_busy(&tasks, at(6)));
+        assert_eq!(tasks_busy_until(&tasks, at(6)), Some(at(8)));
+        assert_eq!(tasks_busy_until(&tasks, at(9)), None);
+    }
+
+    #[test]
+    fn clamp_applies_min_then_max() {
+        let settings = window::Settings {
+            min_size: Some(Size::new(100.0, 100.0)),
+            max_size: Some(Size::new(80.0, 200.0)),
+            ..window::Settings::default()
+        };
+        assert_eq!(
+            clamp(&settings, Size::new(10.0, 10.0)),
+            Size::new(80.0, 100.0)
+        );
+        assert_eq!(
+            clamp(&settings, Size::new(500.0, 500.0)),
+            Size::new(80.0, 200.0)
+        );
+    }
+
+    #[test]
+    fn window_actions_have_names() {
+        use iced_runtime::window::Action;
+        assert_eq!(window_action_name(&Action::RedrawAll), "RedrawAll");
+        assert_eq!(
+            window_action_name(&Action::Drag(window::Id::unique())),
+            "Drag"
+        );
     }
 
     #[test]
