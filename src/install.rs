@@ -435,33 +435,28 @@ mod tests {
         let base = temp_dir("parse");
         let root = fs::canonicalize(&base).unwrap();
         let other = temp_dir("parse-other");
-        let claude = format!(
-            r#"[
-                {{"id": "{PLUGIN_ID}", "scope": "local", "projectPath": "{other}"}},
-                {{"id": "other@market", "scope": "user"}},
-                {{"id": "{PLUGIN_ID}", "scope": "user"}},
-                {{"id": "{PLUGIN_ID}", "scope": "project", "projectPath": "{root}"}},
-                {{"id": "{PLUGIN_ID}", "scope": "user"}}
-            ]"#,
-            other = other.display(),
-            root = root.display(),
-        );
+        let claude = serde_json::json!([
+            {"id": PLUGIN_ID, "scope": "local", "projectPath": other},
+            {"id": "other@market", "scope": "user"},
+            {"id": PLUGIN_ID, "scope": "user"},
+            {"id": PLUGIN_ID, "scope": "project", "projectPath": root},
+            {"id": PLUGIN_ID, "scope": "user"},
+        ])
+        .to_string();
         assert_eq!(
             parse_installs(&AGENTS[0], &claude, &root).unwrap(),
             ["user", "project"]
         );
 
-        let omp = format!(
-            r#"{{"npm": [{{"id": "{PLUGIN_ID}"}}], "marketplace": [
-                {{"id": "{PLUGIN_ID}", "scope": "user", "entries": [
-                    {{"scope": "user", "installPath": "/x"}},
-                    {{"scope": "project", "installPath": "/y"}},
-                    {{"scope": "project", "projectPath": "{other}"}}
-                ]}},
-                {{"id": "other@market", "scope": "user", "entries": [{{"scope": "user"}}]}}
-            ]}}"#,
-            other = other.display(),
-        );
+        let omp = serde_json::json!({"npm": [{"id": PLUGIN_ID}], "marketplace": [
+            {"id": PLUGIN_ID, "scope": "user", "entries": [
+                {"scope": "user", "installPath": "/x"},
+                {"scope": "project", "installPath": "/y"},
+                {"scope": "project", "projectPath": other},
+            ]},
+            {"id": "other@market", "scope": "user", "entries": [{"scope": "user"}]},
+        ]})
+        .to_string();
         assert_eq!(
             parse_installs(&AGENTS[1], &omp, &root).unwrap(),
             ["user", "project"]
