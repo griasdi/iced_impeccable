@@ -6,11 +6,10 @@
 [![docs.rs](https://img.shields.io/docsrs/iced_impeccable)](https://docs.rs/iced_impeccable)
 [![iced 0.14](https://img.shields.io/badge/iced-0.14-blue.svg)](https://iced.rs)
 
-Headless remote control for [iced](https://iced.rs) 0.14 applications and daemons, built
-for coding agents that need to see and operate the UI they change, plus a
-companion skill that brings the
-[impeccable](https://impeccable.style) design workflow to iced
-desktop apps.
+Headless remote control for [iced](https://iced.rs) 0.14 applications and
+daemons, built for coding agents that need to see and operate the UI they
+change, plus a companion skill that brings the
+[impeccable](https://impeccable.style) design workflow to iced desktop apps.
 
 The app runs offscreen with its real renderer behind a local control socket
 (a named pipe on Windows). A client sends one command per connection: input,
@@ -23,6 +22,19 @@ involved.
 *The demo app captured with `screenshot --annotate`: the numbers match the
 node lines `tree` prints, so an agent clicks `tap #settings` or
 `tap --nth 2 Save` instead of guessing coordinates.*
+
+## Install
+
+```sh
+cargo install iced_impeccable --bin iced-impeccable --locked
+```
+
+The `iced-impeccable` binary:
+
+- `ctl`: the client, the same as `<app> ctl` ([Run](#run));
+- `sheet`: contact sheets from screenshots ([Contact sheets](#contact-sheets));
+- `install`: the skill into a repository ([Skill](#skill));
+- `help`: the protocol, offline.
 
 ## Integrate
 
@@ -52,11 +64,11 @@ fn main() -> iced::Result {
 }
 ```
 
-- Give icon-only interactive widgets an id: `container(button(icon)).id("settings")`.
+- Icon-only interactive widgets get an id: `container(button(icon)).id("settings")`.
 - Code that parses argv uses `iced_impeccable::app_args()` (argv without the host flags).
 - Code that must not open OS dialogs checks `iced_impeccable::is_headless()`.
 - Desktop integration that must not run headless (tray icons) goes into
-  `.windowed(|| ...)`; headless-only setup into `.headless(|| ...)`.
+  `.windowed(|| ...)`, headless-only setup into `.headless(|| ...)`.
 - A daemon (`iced::daemon(...)`) is wrapped the same way: `Remote::new(daemon)`.
 - Release builds never enable `remote`.
 
@@ -79,26 +91,26 @@ quit
 EOF
 ```
 
-`ctl [--wait MS] [--keep-going] [--window N] <socket> <command...>` retries the connection
-for up to 5 s (no sleep after starting the host), prints the reply, and exits
-0 on `ok`, 1 on `err`, 2 on bad usage. With `-` it reads a batch from stdin
-(blank lines and `#` comments skipped) and stops at the first `err` unless
-`--keep-going`.
+`ctl [--wait MS] [--keep-going] [--window N] <socket> <command...>` retries
+the connection for up to 5 s (no sleep after starting the host), prints the
+reply and exits 0 on `ok`, 1 on `err`, 2 on bad usage. With `-` it reads a
+batch from stdin (blank lines and `#` comments skipped) and stops at the
+first `err` unless `--keep-going`.
 
 A host started with a plain `&` belongs to the shell that started it. Tools
 that run each command in a fresh shell (agent harnesses) kill it when that
 command returns: start it as a background job of the harness, with
-`setsid ... &`, or drive it in the same command line that started it.
+`setsid ... &`, or drive it in the same command line.
 
 `--backend tiny-skia` renders on the CPU and needs no GPU (CI uses it);
-`wgpu` is the default, so screenshots show the real GPU pipelines.
+`wgpu`, the default, shows the real GPU pipelines in screenshots.
 
 ## Protocol
 
 One request line per connection; the reply is everything the host writes
 until it closes the connection. The first line starts with `ok` or `err`,
-further lines are payload. Coordinates are UI-logical pixels; a PNG pixel is a
-logical pixel times the scale.
+further lines are payload. Coordinates are UI-logical pixels; a PNG pixel is
+a logical pixel times the scale.
 
 | Command | Reply |
 |---|---|
@@ -128,11 +140,11 @@ logical pixel times the scale.
 | `<custom> [ARGS]` | `ok`, `err NAME: ...`, or `err unknown command "NAME" (see help)` |
 
 **Several windows**: a daemon, or an app that opens more windows, has several
-pretend windows, numbered from 1 in the order they opened (`windows` lists
-them). A command addresses the oldest open window unless its line starts with
-`@N `: `@2 tap Close`, `@2 screenshot second.png`. `ctl --window N` puts
-`@N ` in front of every line that has none. A missing window answers
-`err no window N (open: 1..M, see windows)`, or `err no window open`. `help`,
+pretend windows, numbered from 1 in opening order (`windows` lists them). A
+command addresses the oldest open window unless its line starts with `@N `:
+`@2 tap Close`, `@2 screenshot second.png`. `ctl --window N` prefixes `@N `
+to every line without one. A missing window answers
+`err no window N (open: 1..M, see windows)` or `err no window open`. `help`,
 `windows`, `clip`, `clip-set`, `appearance`, `wait-idle`, `record-stop`,
 `quit` and custom commands ignore the selector. When a window closes,
 `wait-gone` on it answers `ok`, `wait-for` `err window closed`, and its
@@ -145,11 +157,11 @@ do next: `err not found: Sav; similar: "Save", "Saved Ada"`,
 `err ambiguous: 2 matches (use --nth): ...`,
 `err not visible: X Y W H (scroll it into view)`.
 
-**Node lines**: `{idx} {kind} at {cx},{cy} box {x} {y} {w} {h}` then optional
-` id=ID`, ` focused`, ` hidden`, ` offset X,Y content WxH` (scrollable),
-` text="..."`. Kinds: `text`, `input`, `focusable`, `scrollable`,
-`container`, `custom`. Anonymous containers with content are left out unless
-`--all`.
+**Node lines**: `{idx} {kind} at {cx},{cy} box {x} {y} {w} {h}`, then
+optionally ` id=ID`, ` focused`, ` hidden`, ` offset X,Y content WxH`
+(scrollable), ` text="..."`. Kinds: `text`, `input`, `focusable`,
+`scrollable`, `container`, `custom`. Anonymous containers with content are
+left out unless `--all`.
 
 **Keys**: one character, a name (`enter`, `esc`, `tab`, `left`, `pgdn`, `f5`,
 ...), or `code:<Name>` for a physical key; modifiers `ctrl+`, `shift+`,
@@ -172,13 +184,29 @@ fits `--max-width` (default 2560).
 ## Skill
 
 The `iced-impeccable` skill (in `plugin/`) layers iced platform guidance and
-headless verification on top of the
-[impeccable](https://impeccable.style) skill, which must be
-installed as well.
+headless verification on top of the [impeccable](https://impeccable.style)
+skill, which must be installed as well.
+
+Recommended, per repository:
 
 ```sh
-cargo install iced_impeccable --bin iced-impeccable --locked
+iced-impeccable install [--agent claude,omp] [--yes] [DIR]
 ```
+
+- Finds the git repository containing `DIR` (default `.`).
+- Checks whether the marketplace plugin `iced-impeccable@iced-impeccable` is
+  installed for Claude Code or omp; it would load next to the repo copy, so
+  `install` offers to remove it (`--yes` removes without asking) and aborts
+  otherwise.
+- Asks for the agents, with the detected ones preselected; `--agent` skips
+  the question and is required without a terminal.
+- Writes `.claude/skills/iced-impeccable/` and `.omp/skills/iced-impeccable/`.
+- Run again after upgrading the binary, it updates the copy; a symlinked
+  skill directory is left alone.
+
+Whether to commit the copies is the repository's choice.
+
+Alternative, global through the marketplace. The two ways exclude each other.
 
 Claude Code:
 
@@ -213,8 +241,8 @@ scripts/smoke.sh [tiny-skia|wgpu]       # demo headless, every protocol path
 cargo deny --log-level error check
 ```
 
-Changes are listed in [CHANGELOG.md](CHANGELOG.md); the release checklist is
-[RELEASING.md](RELEASING.md). Agent-facing conventions are in
+Changes are listed in [CHANGELOG.md](CHANGELOG.md), the release checklist is
+[RELEASING.md](RELEASING.md), agent-facing conventions are in
 [AGENTS.md](AGENTS.md).
 
 ## License

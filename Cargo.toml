@@ -11,10 +11,12 @@ homepage = "https://github.com/tuco86/iced_impeccable"
 readme = "README.md"
 keywords = ["iced", "gui", "headless", "testing", "automation"]
 categories = ["gui", "development-tools::testing"]
-# The crate ships the library, the binary, the demo, README, CHANGELOG and the
-# licenses; the skill plugin, CI, repo tooling and README assets stay in git.
+# The crate ships the library, the binary, the demo, README, CHANGELOG, the
+# licenses and the skill files (the binary embeds them for `install`); the
+# plugin and marketplace manifests, CI, repo tooling and README assets stay in
+# git.
 exclude = [
-    "/plugin",
+    "/plugin/.claude-plugin",
     "/.claude-plugin",
     "/.github",
     "/.githooks",
@@ -32,6 +34,7 @@ iced_futures = "0.14"
 iced_selector = "0.14"
 png = "0.18"
 font8x8 = "0.3"
+serde_json = "1"
 
 [target.'cfg(windows)'.dependencies]
 tokio = { version = "1", features = ["rt", "net", "io-util", "time"] }

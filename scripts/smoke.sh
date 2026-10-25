@@ -81,6 +81,26 @@ wait "$host" || { echo "FAIL  host exit status $?"; failures=$((failures + 1)); 
 sheet=$("$target/debug/iced-impeccable" sheet "$dir/sheet.png" "$dir/light.png" "$dir/zoom.png" || true)
 [[ $sheet =~ ^ok\ .*/sheet.png\ [0-9]+x[0-9]+$ ]] && echo "ok    sheet" \
     || { echo "FAIL  sheet: $sheet"; failures=$((failures + 1)); }
+
+# Skill install into a repo, with an empty PATH so no agent CLI (and no
+# installed plugin of the developer) is touched.
+mkdir -p "$dir/repo/.git"
+skill_install() { PATH= "$target/debug/iced-impeccable" install --agent claude,omp "$@" 2>&1 || true; }
+out=$(skill_install "$dir/repo")
+[[ $out == *'ok claude .claude/skills/iced-impeccable installed '* \
+    && $out == *'ok omp .omp/skills/iced-impeccable installed '* ]] && echo "ok    install" \
+    || { echo "FAIL  install: $out"; failures=$((failures + 1)); }
+out=$(skill_install "$dir/repo")
+[[ $out == *'ok claude .claude/skills/iced-impeccable up to date '* \
+    && $out == *'ok omp .omp/skills/iced-impeccable up to date '* ]] && echo "ok    install again" \
+    || { echo "FAIL  install again: $out"; failures=$((failures + 1)); }
+if out=$(PATH= "$target/debug/iced-impeccable" install --agent claude "$dir" 2>&1); then
+    echo "FAIL  install outside a repo succeeded: $out"; failures=$((failures + 1))
+elif [[ $out == 'err '*' is not inside a git repository' ]]; then
+    echo "ok    install outside a repo"
+else
+    echo "FAIL  install outside a repo: $out"; failures=$((failures + 1))
+fi
 [[ ! -e $sock ]] || { echo "FAIL  socket left behind"; failures=$((failures + 1)); }
 
 # A daemon with two windows: `windows` lists them, `@N` addresses one.

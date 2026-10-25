@@ -1,8 +1,10 @@
-//! `iced-impeccable ctl ...`, `iced-impeccable sheet ...`, `iced-impeccable help`.
+//! `iced-impeccable ctl ...`, `iced-impeccable sheet ...`,
+//! `iced-impeccable install ...`, `iced-impeccable help`.
 
 const USAGE: &str =
     "usage: iced-impeccable ctl [--wait MS] [--keep-going] [--window N] <socket> <command> [args...] | -
        iced-impeccable sheet [--cols N] [--labels a,b,c] [--max-width PX] OUT.png IN.png...
+       iced-impeccable install [--agent claude,omp] [--yes] [DIR]
        iced-impeccable help";
 
 fn main() {
@@ -10,6 +12,7 @@ fn main() {
     let code = match args.split_first() {
         Some((command, rest)) if command == "ctl" => iced_impeccable::cli::ctl(rest),
         Some((command, rest)) if command == "sheet" => iced_impeccable::cli::sheet(rest),
+        Some((command, rest)) if command == "install" => iced_impeccable::cli::install(rest),
         Some((command, [])) if command == "help" => {
             println!("{}", iced_impeccable::cli::help());
             0

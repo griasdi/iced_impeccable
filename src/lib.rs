@@ -46,6 +46,7 @@ mod channel;
 mod client;
 mod host;
 mod image;
+mod install;
 mod keys;
 mod protocol;
 mod remote;

@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `iced-impeccable install [--agent claude,omp] [--yes] [DIR]` copies the
+  skill, embedded in the binary, into the git repository containing `DIR`
+  (`.claude/skills/iced-impeccable/`, `.omp/skills/iced-impeccable/`). It
+  first offers to remove a marketplace install of the plugin, asks for the
+  agents with the detected ones preselected, updates a stale copy and leaves
+  a symlinked skill directory alone.
+- The crate package ships the skill files (`plugin/skills/`).
+
 ## [0.2.0] - 2026-10-11
 
 ### Added
