@@ -23,6 +23,7 @@ exclude = [
     "/assets",
     "/scripts",
     "/AGENTS.md",
+    "/CONTRIBUTING.md",
     "/RELEASING.md",
     "/deny.toml",
 ]
