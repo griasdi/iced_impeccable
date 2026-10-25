@@ -1,6 +1,6 @@
 Run systematic **technical** quality checks on an iced desktop app and generate a comprehensive report. Don't fix issues; document them for other commands to address.
 
-This is a code-level audit plus a headless check, not a design critique. Audit from the Rust source (views, style functions, subscriptions, theme module) and confirm behaviour on a headless instance per [verify.md](verify.md). No browser tooling and no `impeccable detect` applies. Score against [iced.md](iced.md), including its slop test; read it first if Setup hasn't already. The report skeleton mirrors impeccable's `audit.md` and `audit.native.md`; keep them in sync when changing it.
+This is a code-level audit plus a headless check, not a design critique. Audit from the Rust source (views, style functions, subscriptions, theme module) and confirm behaviour on a headless instance per [verify.md](verify.md). No browser tooling and no `impeccable detect` applies. Score against [iced.md](iced.md), including its slop test; read it first if Setup hasn't already. The report format is impeccable's `audit.native.md` "Generate Report", read with the overrides under Report below.
 
 ## Diagnostic Scan
 
@@ -11,7 +11,7 @@ Run comprehensive checks across 5 dimensions. Score each dimension 0-4 using the
 iced 0.14 exposes no accessibility tree, so screen-reader support is out of scope; say so once in the report and score what the app controls.
 
 **Check for**:
-- **Keyboard reachability**: start headless, then loop `key tab` + `focused` through the window (`focused` replies `ok X Y W H` or `err none`). Every focusable widget must be visited; count what was reached against `tree` nodes of kind `input` / `focusable`. iced 0.14 buttons take no keyboard focus (they report as `container`), so check that every button action also has a keyboard path (shortcut, Enter on the form's input). Unreachable actions, focus traps and focus lost after navigation are findings.
+- **Keyboard reachability**: start headless, then loop `key tab` + `focused` through the window (`focused` replies `ok X Y W H` or `err none`). Every focusable widget must be visited; count what was reached against `tree` nodes of kind `input` / `focusable`. iced 0.14 buttons, checkboxes, radios, togglers, sliders and pick lists take no keyboard focus (a button reports as `container`), so check that every such action also has a keyboard path (shortcut, Enter on the form's input, a custom focusable widget). Unreachable actions, focus traps and focus lost after navigation are findings.
 - **Visible focus**: `screenshot --crop X Y W H --zoom 3` on the focused widget in both appearances; a focused control that looks like an unfocused one fails.
 - **Contrast**: text below 4.5:1 (large text 3:1), UI boundaries below 3:1, in dark and light (`appearance light`); disabled states included.
 - **Scale**: layouts that clip or overlap at `scale 1.5` and `scale 2`; text under 12 logical px.
@@ -25,7 +25,7 @@ iced 0.14 exposes no accessibility tree, so screen-reader support is out of scop
 **Check for**:
 - **Perpetual redraw at rest**: `wait-idle` on an idle screen replying `ok animating` means something requests frames forever (a `window::frames()` subscription that never drops, a `time::every` with a short period, an `Animation` never finishing). `err timeout` means the UI keeps changing.
 - **Heavy work in `view`**: allocation-heavy list building, sorting, formatting, or parsing on every call; `view` runs on every update.
-- **Missing caching**: custom drawing without `canvas::Cache` (cache cleared only on real change); expensive subtrees that could use `iced::widget::lazy` with a cheap dependency key.
+- **Missing caching**: custom drawing without `canvas::Cache` (cache cleared only on real change); expensive subtrees that could use `iced::widget::lazy` (needs iced's `lazy` feature) with a cheap dependency key.
 - **Image handles rebuilt per view**: `image::Handle::from_bytes(..)` or `svg::Handle` created inside `view` instead of stored in state (each new handle defeats the GPU cache).
 - **Blocking work in `update`**: file, network or CPU-heavy work run synchronously instead of in a `Task::perform` / `Task::future`; the UI freezes (visible as `wait-idle` and `tap` replies stalling).
 - **Unvirtualized long lists**: thousands of rows in one `column!` inside a `scrollable`; page, window or virtualise them. Check the `Row 1..N` style hidden rows in `tree`: node count grows with content.
@@ -73,80 +73,16 @@ Score against [iced.md](iced.md), including its slop test. **Check for**:
 
 **Score 0-4**: 0=One window size only, 1=Major breakage (compact or wide broken), 2=Partial, 3=Good (minor edge cases), 4=Excellent (adapts across size classes, scale factors and string lengths)
 
-## Generate Report
+## Report
 
-### Audit Health Score
+Generate the report exactly as `audit.native.md` "Generate Report" says (health score table and rating bands, verdict, executive summary, findings by P0-P3 severity, patterns, positives, recommended actions, closing message), with these overrides:
 
-| # | Dimension | Score | Key Finding |
-|---|-----------|-------|-------------|
-| 1 | Accessibility | ? | [most critical issue or "--"] |
-| 2 | Performance | ? | |
-| 3 | Appearance & Theming | ? | |
-| 4 | Desktop Conformance | ? | |
-| 5 | Adaptivity | ? | |
-| **Total** | | **??/20** | **[Rating band]** |
+- **Desktop Conformance** replaces "Platform Conformance" (row 4 of the score table and the verdict heading, "Desktop Conformance Verdict"). The verdict asks whether the app reads as a desktop app or a ported website / the stock iced example, and names the captures and `ctl` commands that are the evidence.
+- **Guideline** cites the [iced.md](iced.md) rule; **Location** is view, file, line.
+- Pattern examples: "Raw `Color::from_rgb` appears in 15+ views, should use `extended_palette()`"; "Icon-only buttons are below 24x24 and carry no tooltip or id throughout the toolbar".
+- Screen-reader support is out of scope (iced 0.14 has no accessibility tree): say so once and score what the app controls.
 
-**Rating bands**: 18-20 Excellent (minor polish), 14-17 Good (address weak dimensions), 10-13 Acceptable (significant work needed), 6-9 Poor (major overhaul), 0-5 Critical (fundamental issues)
-
-### Desktop Conformance Verdict
-**Start here.** Pass/fail: does this read as a desktop app or a ported website / the stock iced example? List specific violations. Be brutally honest. Name which captures or ctl commands produced the evidence.
-
-### Executive Summary
-- Audit Health Score: **??/20** ([rating band])
-- Total issues found (count by severity: P0/P1/P2/P3)
-- Top 3-5 critical issues
-- Recommended next steps
-
-### Detailed Findings by Severity
-
-Tag every issue with **P0-P3 severity**:
-- **P0 Blocking**: Prevents task completion. Fix immediately
-- **P1 Major**: Significant difficulty or guideline violation. Fix before release
-- **P2 Minor**: Annoyance, workaround exists. Fix in next pass
-- **P3 Polish**: Nice-to-fix, no real user impact. Fix if time permits
-
-For each issue, document:
-- **[P?] Issue name**
-- **Location**: View, file, line
-- **Category**: Accessibility / Performance / Theming / Conformance / Adaptivity
-- **Impact**: How it affects users
-- **Guideline**: The [iced.md](iced.md) rule it violates (if applicable)
-- **Recommendation**: How to fix it
-- **Suggested command**: Which command to use (prefer: /impeccable adapt, /impeccable animate, /impeccable audit, /impeccable bolder, /impeccable clarify, /impeccable colorize, /impeccable critique, /impeccable delight, /impeccable distill, /impeccable document, /impeccable harden, /impeccable layout, /impeccable onboard, /impeccable optimize, /impeccable overdrive, /impeccable polish, /impeccable quieter, /impeccable shape, /impeccable typeset)
-
-### Patterns & Systemic Issues
-
-Identify recurring problems that indicate systemic gaps rather than one-off mistakes:
-- "Raw `Color::from_rgb` appears in 15+ views, should use `extended_palette()`"
-- "Icon-only buttons are below 24x24 and carry no tooltip or id throughout the toolbar"
-
-### Positive Findings
-
-Note what's working well: good practices to maintain and replicate.
-
-## Recommended Actions
-
-List recommended commands in priority order (P0 first, then P1, then P2):
-
-1. **[P?] `/command-name`**: Brief description (specific context from audit findings)
-2. **[P?] `/command-name`**: Brief description (specific context)
-
-**Rules**: Only recommend commands from: /impeccable adapt, /impeccable animate, /impeccable audit, /impeccable bolder, /impeccable clarify, /impeccable colorize, /impeccable critique, /impeccable delight, /impeccable distill, /impeccable document, /impeccable harden, /impeccable layout, /impeccable onboard, /impeccable optimize, /impeccable overdrive, /impeccable polish, /impeccable quieter, /impeccable shape, /impeccable typeset. Map findings to the most appropriate command. End with `/impeccable polish` as the final step if any fixes were recommended.
-
-After presenting the summary, tell the user:
-
-> You can ask me to run these one at a time, all at once, or in any order you prefer.
->
-> Re-run `/impeccable audit` after fixes to see your score improve.
-
-**IMPORTANT**: Be thorough but actionable. Too many P3 issues creates noise. Focus on what actually matters.
-
-**NEVER**:
-- Report issues without explaining impact (why does this matter?)
-- Provide generic recommendations (be specific and actionable)
-- Skip positive findings (celebrate what works)
-- Forget to prioritize (everything can't be P0)
-- Report false positives without verification
-- Drive the user's desktop or a browser to gather evidence
-- Run `impeccable detect` or hooks (not available on iced)
-- Score screen-reader support the toolkit cannot provide
+**Avoid**, in addition to `audit.native.md`'s list:
+- Driving the user's desktop or a browser to gather evidence
+- Running `impeccable detect` or hooks (not available on iced)
+- Scoring screen-reader support the toolkit cannot provide

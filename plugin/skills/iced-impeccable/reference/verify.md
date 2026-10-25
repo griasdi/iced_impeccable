@@ -6,7 +6,7 @@ Every visual check of an iced app runs against a headless instance driven throug
 
 - **Never drive the user's desktop.** No `xdotool`, `ydotool`, `Xvfb`, no desktop or window screenshots, no synthetic input to a real display.
 - **Never run, signal or replace the user's installed binary** (for example `~/.cargo/bin/<app>`). Build your own into a separate target dir and run that.
-- **Build**: `CARGO_TARGET_DIR=target/agent cargo build --features remote`. Release builds never enable `remote`.
+- **Build**: `CARGO_TARGET_DIR=target/agent cargo build --features remote`; in a workspace `cargo build -p <crate> --features <feature>`. Prefer a project's documented headless script (README, AGENTS.md or CLAUDE.md, e.g. `scripts/headless.sh`) over assembling the commands yourself. Release builds never enable `remote`.
 - **One state dir per instance.** Point the app's data/config home at its own directory under `/tmp` (the app's environment variable or flag), so an instance never touches the user's data.
 - **Signals by PID** taken from `info` (`ok pid <pid> ...`), never by process name. End every instance with `quit`.
 - On Windows the control channel is a named pipe (`--control <name>`, no path); use the agent's scratch directory instead of `/tmp`, and run a copy of the `.exe`, since Windows locks a running executable.
@@ -45,15 +45,16 @@ Lines starting with `#` and blank lines are skipped, so a batch can be commented
 
 ### Locate, then act
 
-- Find widgets with `tree` (node lines: `idx kind at cx,cy box x y w h id=.. focused hidden text="..."`) or `screenshot --annotate PATH`, which draws the numbered boxes and prints the node lines of what it drew. Coordinates come from `tree` / the legend, never guessed from pixels.
-- Targets: `#ID` (widget id), `~SUBSTRING` (text contains), otherwise exact text; `--nth N` picks the Nth match (1-based, tree order) when a target is ambiguous. Pick lists, icon-only buttons and toggles report no text: give them an id in the app and `tap #id`. An empty `text_input` reports its placeholder as its text (`input ... text="Your name"`); address inputs by id.
-- `tap [--nth N] TARGET` clicks the centre of the visible bounds and replies `ok X Y`. `find` / `find-all` report bounds without clicking. `focused` reports the focused widget (`err none` when nothing has focus).
+- Find widgets with `tree` (node lines: `idx kind at cx,cy box x y w h[ id=..][ focused][ hidden][ offset ..][ text=".."]`) or `screenshot --annotate PATH`, which draws the numbered boxes and prints the node lines of what it drew. Kinds are `text`, `input`, `focusable`, `scrollable` (with `offset X,Y content WxH`), `container` (a button reports as one) and `custom`. `hidden` means scrolled or clipped out of view; `tree --all` adds hidden and anonymous nodes. Coordinates come from `tree` / the legend, never guessed from pixels.
+- Targets: `#ID` (widget id), `~SUBSTRING` (text contains), `=TEXT` (exact text, also when it starts with `#`, `~` or `=`), otherwise exact text; `--nth N` picks the Nth match (1-based, tree order) when a target is ambiguous. Pick lists, icon-only buttons and toggles report no text: give them an id in the app and `tap #id`. An empty `text_input` reports its placeholder as its text (`input ... text="Your name"`); address inputs by id.
+- `tap [--nth N] TARGET` clicks the centre of the visible bounds and replies `ok X Y`. `hover [--nth N] TARGET` moves the pointer to the centre instead, for tooltips and hover states (`ok X Y`). `find` / `find-all` report bounds without clicking. `focused` reports the focused widget (`err none` when nothing has focus).
 - Errors guide the next step: `err not found: Sav; similar: "Save", ...` (typo), `err ambiguous: 2 matches (use --nth): ...` (add `--nth` or use `#id`), `err not visible: ... (scroll it into view)` (use `scroll X Y DY` first).
 - Scrolling: `scroll X Y DY [DX]` in wheel lines; `DY > 0` scrolls up, `DY < 0` scrolls down.
-- Keyboard: `key SPEC` (`key tab`, `key shift+tab`, `key ctrl+s`, `key left`, `key esc`, `key enter`), `keydown` / `keyup` for held keys, `type TEXT` for text. Unknown key names answer with the full list.
+- Keyboard: `key SPEC` (`key tab`, `key shift+tab`, `key ctrl+s`, `key left`, `key esc`, `key enter`), `keydown` / `keyup` for held keys, `type TEXT` for text. `type -e` and `clip-set -e` take escapes: `\n` Enter, `\t` Tab, `\\` backslash. Letters, digits and named keys carry physical key codes, so shortcuts that match physical keys fire. Unknown key names answer with the full list.
 - Mouse: `move`, `down`, `up`, `click X Y [BUTTON] [MODS]`, `dblclick`, `drag X1 Y1 X2 Y2 [STEPS] [MS]`.
 - Clipboard: `clip` reads, `clip-set TEXT` writes.
 - Files: `drop PATH` drags a file onto the window and drops it.
+- Video: `record PATH` starts recording, `record-stop` ends it (`ok PATH N frames Ts`; `err window resized during recording: ...` if the app resized the window). The host runs its own `ffmpeg`; the ban on ffmpeg covers the agent's post-processing. Contact sheets stay in the `iced-impeccable` binary.
 - App-specific commands registered by the app (`Remote::command`) are listed under `custom:` in `help`.
 
 ### Several windows
@@ -66,15 +67,16 @@ Lines starting with `#` and blank lines are skipped, so a batch can be commented
 ### Waiting
 
 - After navigation or any asynchronous change: `wait-for [--timeout MS] TARGET` (default 5000; `err timeout` on failure) or `wait-gone`.
-- Before every screenshot: `wait-idle [MS]`.
+- Before every screenshot: `wait-idle [--timeout MS] [MS]` (quiet period default 200 ms, timeout default 10 000 ms).
   - `ok idle`: nothing changed for the quiet period and no redraw is due.
   - `ok animating`: only redraws keep it busy. This is a valid capture of a continuously redrawing UI (spinner, clock). At rest it is a finding: an unnecessary perpetual redraw.
-  - `err timeout`: the UI keeps changing; investigate.
+  - `err timeout`: the UI kept changing until `--timeout` ran out; investigate.
 
 ### Screenshots
 
 - `screenshot PATH` writes the full window PNG (`ok PATH WxH scale S`; pixels = logical x scale).
 - `screenshot --annotate PATH` overlays numbered outlines for locating widgets; not for review captures.
+- `screenshot --no-pointer PATH` renders as if the pointer were outside the window: no hover state.
 - Small details: `screenshot --crop X Y W H --zoom 3 PATH` (crop in UI-logical coordinates, zoom 1-8). Never `magick`, `convert` or other external image tools.
 - Appearance and scale on a running instance: `appearance dark|light`, `scale F`, `resize W H` (clamped to the window's min/max size; reply `ok W H`). `size` replies `ok W H SCALE`.
 
@@ -122,7 +124,7 @@ iced-impeccable sheet .impeccable/review/sheet.png .impeccable/review/desktop-*.
 
 1. Look at `sheet.png` first for the overall picture (labels are the file stems).
 2. Then open each file once; do not loop on screenshots.
-3. Pass these file names explicitly to `impeccable-finish-reviewer` as the desktop window classes.
+3. Pass the path to [iced.md](iced.md), these file names as the required window classes, and "no detector ran; platform is iced desktop" to `impeccable-finish-reviewer`.
 
 Instances that must differ (for example a state that needs a restart) use `-agent-2.sock` with their own state dir. Variants use [variants.iced.md](variants.iced.md).
 

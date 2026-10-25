@@ -34,8 +34,8 @@ Default to plain built-in widgets styled consistently; depart only for a reason 
 ## Pointer & keyboard targets
 
 - **24x24 logical minimum** for every clickable control, **32x32** for primary actions. A 16 px icon sits inside a button with `padding` that reaches the minimum.
-- **Every style function handles every state.** `button::Style` closures match on `button::Status::{Active, Hovered, Pressed, Disabled}`; `text_input::Status::{Active, Hovered, Focused { is_hovered }, Disabled}`; the same for `pick_list`, `checkbox`, `toggler`, `slider`. A style that returns one value for all statuses is a defect.
-- **Visible focus.** Give focusable widgets (`text_input`, `text_editor`, custom focusables) a distinct `Border` / background for the focused state; `text_input` reports `Status::Focused`. iced 0.14 buttons take no keyboard focus at all: give every button action a keyboard path (shortcut, Enter on the form's input) instead.
+- **Every style function handles every state.** Each widget has its own `Status`: `button` {Active, Hovered, Pressed, Disabled}; `text_input` / `text_editor` {Active, Hovered, Focused { is_hovered }, Disabled}; `checkbox` {Active, Hovered, Disabled} each with `is_checked`; `toggler` the same with `is_toggled`; `radio` {Active, Hovered} with `is_selected`; `slider` {Active, Hovered, Dragged}; `pick_list` {Active, Hovered, Opened { is_hovered }}. A style that returns one value for all statuses is a defect.
+- **Visible focus.** Only `text_input` and `text_editor` take keyboard focus; give them a distinct `Border` / background for `Status::Focused`. Button, checkbox, radio, toggler, slider and pick_list are outside the Tab order. For a keyboard path, add a shortcut or Enter on the form's input, or wrap the control in a custom focusable widget: implement `Widget::operate` calling `operation.focusable(..)` (iced's `advanced` feature), draw its own focus ring, and send its message on Enter/Space.
 - **Tab order.** Bind Tab and Shift+Tab with `iced::widget::operation::focus_next()` / `focus_previous()` (both return a `Task`) from a keyboard subscription (`iced::keyboard::listen()`, which yields the key events no widget captured). Order follows the widget tree; reorder the `view`, not the style.
 - **Enter submits.** `text_input(..).on_submit(Message::Submit)`; the default button of a form gets the same message.
 - **Escape closes** overlays, popups and modals; it never quits the app.
@@ -63,8 +63,8 @@ Default to plain built-in widgets styled consistently; depart only for a reason 
 
 ## Components & controls
 
-- **Built-in widget per need**: `button`, `checkbox`, `radio`, `toggler`, `slider`, `pick_list`, `combo_box`, `text_input`, `text_editor`, `progress_bar`, `tooltip`, `table`, `scrollable`, `rule`, `markdown`. Reinventing these for flavour is the most common slop.
-- **Modals** are a `stack![base, opaque(mouse_area(center(dialog)).on_press(Message::Close))]`: `opaque` swallows input for the layer below, the `mouse_area` closes on a click outside, `Escape` closes via the keyboard subscription. Dialogs have one default action and a visible Cancel. Use a modal only for a task that needs interruption or protected focus.
+- **Built-in widget per need**: `button`, `checkbox`, `radio`, `toggler`, `slider`, `pick_list`, `combo_box`, `text_input`, `text_editor`, `progress_bar`, `tooltip`, `table`, `scrollable`, `rule`, `markdown` (needs iced's `markdown` feature; `svg`, `canvas` and `image` likewise need their iced features). Reinventing these for flavour is the most common slop.
+- **Modals** are a `stack![base, opaque(mouse_area(center(opaque(dialog))).on_press(Message::Close))]`. The outer `opaque` keeps presses from reaching `base`; the `mouse_area` closes on a press outside the dialog; the inner `opaque(dialog)` captures presses on the dialog, so they never reach the `mouse_area` (without it every click on the dialog closes it); `Escape` closes via the keyboard subscription. Dialogs have one default action and a visible Cancel. Use a modal only for a task that needs interruption or protected focus.
 - **One icon set on one size grid** (for example 16 px glyphs from a single icon font or SVG set via `svg(Handle)`), one stroke weight. Icon-only buttons get a `tooltip` and an id (`container(button(..)).id("settings")`) so they are findable in verification.
 - **Lists and settings** use plain rows with `rule` separators and a consistent label/control grid, not stacks of bordered cards.
 - **Empty, loading and error states** are designed: an empty list says what to do next; an error names the problem and the recovery.
@@ -72,7 +72,7 @@ Default to plain built-in widgets styled consistently; depart only for a reason 
 
 ## Motion
 
-- **`iced::Animation`** (`Animation::new(false).duration(Duration::from_millis(180)).easing(animation::Easing::EaseOut)`) holds the value; read it in `view` with `animation.interpolate(from, to, now)`, update it in `update` with `animation.go_mut(target, now)`.
+- **`iced::Animation`** (`Animation::new(false).duration(Duration::from_millis(180)).easing(animation::Easing::EaseOutExpo)`) holds the value; read it in `view` with `animation.interpolate(from, to, now)`, update it in `update` with `animation.go_mut(target, now)`.
 - **Frames only while animating.** Subscribe to `iced::window::frames()` only while `animation.is_animating(now)`; drop the subscription at rest. Mark the frame message as a heartbeat (`Remote::heartbeat`) so verification is not confused.
 - **Duration 120-250 ms**, exponential ease-out from an already-visible default. One authored moment, not scattered effects.
 - **Perpetual redraw at rest is a defect.** A spinner or clock that never stops costs battery and shows up in verification as `wait-idle` → `ok animating`. That reply is fine for a deliberate loading indicator and a finding for anything else.

@@ -106,6 +106,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the host picks `wgpu` when that feature is on, else `tiny-skia`. The
   `iced-impeccable` binary requires `cli`. A host that finds no renderer says
   it may not be compiled in.
+- The skill is aligned with impeccable 4.7: native-equivalence rule, command
+  overrides for `critique`, `optimize`, `craft`, `doctor` and bare
+  `/impeccable`, per-widget status lists, a corrected modal recipe, and
+  documented `hover`, `=TEXT`, `type -e`, `--no-pointer`, `wait-idle
+  --timeout` and `record`.
 
 ## [0.2.0] - 2026-10-11
 

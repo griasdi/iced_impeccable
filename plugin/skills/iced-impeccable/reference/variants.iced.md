@@ -16,32 +16,31 @@ Use for `live` and `generate [n] [action] [element]`. Verification mechanics are
    ```
    Variant `a` is the current design when refining, so the sheet shows before/after. Variants share the data model; only presentation differs. Keep variant code in separate functions so the cleanup is mechanical.
 3. **Build once**: `CARGO_TARGET_DIR=target/agent cargo build --features remote`.
-4. **One headless instance per variant**, each with its own socket and state dir:
+4. **One headless instance per variant**, each with its own socket and state dir, started like [verify.md](verify.md) "Start":
    ```sh
-   IMPECCABLE_VARIANT=a target/agent/debug/<app> --headless --control /tmp/<app>-agent-a.sock --size 1280x800 &
-   IMPECCABLE_VARIANT=b target/agent/debug/<app> --headless --control /tmp/<app>-agent-b.sock --size 1280x800 &
-   IMPECCABLE_VARIANT=c target/agent/debug/<app> --headless --control /tmp/<app>-agent-c.sock --size 1280x800 &
+   for v in a b c; do IMPECCABLE_VARIANT=$v setsid target/agent/debug/<app> --headless --control /tmp/<app>-agent-$v.sock --size 1280x800 </dev/null >/dev/null 2>/tmp/<app>-agent-$v.log & done
    ```
-   Give each its own state dir (`/tmp/<app>-agent-a/...`) as in verify.md.
+   Each instance gets its own state dir `/tmp/<app>-agent-$v/`.
 5. **Drive each to the same state** with an identical batch (only the socket differs), then capture:
    ```sh
    for v in a b c; do
-   iced-impeccable ctl /tmp/<app>-agent-$v.sock - <<EOF
+   iced-impeccable ctl --keep-going /tmp/<app>-agent-$v.sock - <<EOF
    # ... same steps for every variant ...
    wait-idle
    screenshot /tmp/<app>-variants/$v.png
    quit
    EOF
    done
+   for v in a b c; do iced-impeccable ctl --wait 300 /tmp/<app>-agent-$v.sock quit >/dev/null 2>&1; done
    ```
-   The heredoc is unquoted so `$v` expands per variant; keep other `$` out of the batch lines.
+   The heredoc is unquoted so `$v` expands per variant; keep other `$` out of the batch lines. The second loop ends any instance the batch did not reach (a failed round). Any `err` in a variant's replies means rerun that variant.
 6. **Contact sheet**:
    ```sh
    iced-impeccable sheet --labels a,b,c /tmp/<app>-variants/sheet.png /tmp/<app>-variants/a.png /tmp/<app>-variants/b.png /tmp/<app>-variants/c.png
    ```
    Use `--crop X Y W H --zoom N` on `screenshot` when the varied element is small, so the sheet shows it large. Add a light-appearance row if the variants differ by colour logic.
 7. **Show the sheet to the user and ask which variant to keep** (impeccable's question tool). Say in one line what each variant explores. One round only; if none fits, ask what to change and run one more round, no more.
-8. **Keep the chosen code.** Delete the `IMPECCABLE_VARIANT` switch, the `variant()` helper and the unchosen variants' functions; the app builds and behaves as if the chosen design had always been the only one. `quit` every instance and delete `/tmp` captures you created.
+8. **Keep the chosen code.** Delete the `IMPECCABLE_VARIANT` switch, the `variant()` helper and the unchosen variants' functions; the app builds and behaves as if the chosen design had always been the only one. Every instance has been `quit` (step 5's cleanup loop, also after a failed round). Delete the `/tmp` captures, logs, sockets and state dirs you created.
 
 ## Rules
 
