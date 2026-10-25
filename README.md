@@ -120,21 +120,22 @@ a logical pixel times the scale.
 | `size` | `ok W H SCALE` |
 | `move X Y [MS]`, `down [BUTTON]`, `up [BUTTON]`, `click X Y [BUTTON] [MODS]`, `dblclick X Y`, `drag X1 Y1 X2 Y2 [STEPS] [MS]` | `ok` |
 | `scroll X Y DY [DX]` | `ok`; wheel lines, DY>0 scrolls up, DY<0 scrolls down |
-| `key SPEC`, `keydown SPEC`, `keyup SPEC`, `type TEXT` | `ok` |
+| `key SPEC`, `keydown SPEC`, `keyup SPEC`, `type [-e] TEXT` | `ok`; `-e`: `\n` Enter, `\t` Tab, `\\` backslash |
 | `tap [--nth N] TARGET` | `ok X Y` (clicked point) |
+| `hover [--nth N] TARGET` | `ok X Y` (the pointer moved to the widget's centre) |
 | `find [--nth N] TARGET` | `ok X Y W H` (visible bounds) |
 | `find-all TARGET` | `ok N` + one `X Y W H` line per match (` hidden` when scrolled away) |
 | `focused` | `ok X Y W H` or `err none` |
 | `tree [--all]` | `ok N` + node lines |
 | `wait-for [--timeout MS] TARGET` | `ok X Y W H` or `err timeout` (default 5000) |
 | `wait-gone [--timeout MS] TARGET` | `ok` or `err timeout` (default 5000) |
-| `wait-idle [MS]` | `ok idle`, `ok animating` or `err timeout` (default MS 200) |
-| `screenshot [--annotate] [--crop X Y W H] [--zoom N] PATH` | `ok PATH WxH scale S` (+ node lines with `--annotate`) |
+| `wait-idle [--timeout MS] [MS]` | `ok idle`, `ok animating` or `err timeout` (quiet MS default 200, timeout default 10000) |
+| `screenshot [--annotate] [--no-pointer] [--crop X Y W H] [--zoom N] PATH` | `ok PATH WxH scale S` (+ node lines with `--annotate`; `--no-pointer`: no hover state) |
 | `record PATH`, `record-stop` | `ok recording PATH WxH`, `ok PATH N frames Ts` (needs ffmpeg) |
 | `resize W H` | `ok W H` (clamped to the window's min/max size) |
 | `scale F` | `ok` |
 | `appearance dark\|light` | `ok` |
-| `clip`, `clip-set TEXT` | `ok TEXT`, `ok` |
+| `clip`, `clip-set [-e] TEXT` | `ok TEXT`, `ok` |
 | `drop PATH` | `ok`; FileHovered then FileDropped |
 | `quit` | `ok`, or `ok forced` when the app ignored the close request for 5 s |
 | `<custom> [ARGS]` | `ok`, `err NAME: ...`, or `err unknown command "NAME" (see help)` |
@@ -151,7 +152,8 @@ to every line without one. A missing window answers
 recording ends. `quit` delivers the close request to the oldest window that
 handles close requests itself; a daemon exits only through `iced::exit`.
 
-**Targets**: `#ID` (widget id), `~SUBSTRING` (text contains), otherwise exact
+**Targets**: `#ID` (widget id), `~SUBSTRING` (text contains), `=TEXT` (exact
+text, even when it starts with `#`, `~` or `=`), otherwise exact
 text. `--nth N` picks the Nth match (1-based, tree order). Errors say what to
 do next: `err not found: Sav; similar: "Save", "Saved Ada"`,
 `err ambiguous: 2 matches (use --nth): ...`,
@@ -178,8 +180,8 @@ second (a valid capture of a continuously animating UI, a finding at rest);
 iced-impeccable sheet [--cols N] [--labels a,b,c] [--max-width PX] OUT.png IN.png...
 ```
 
-Lays screenshots out in a labelled grid; images are halved until the sheet
-fits `--max-width` (default 2560).
+Lays screenshots out in a labelled grid; images wider than a cell are shrunk
+to it until the sheet fits `--max-width` (default 2560).
 
 ## Skill
 

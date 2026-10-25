@@ -7,6 +7,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use iced::keyboard::Modifiers;
+use iced::keyboard::key::Named;
 use iced::{Point, Rectangle, Size, mouse};
 
 use crate::keys::Keystroke;
@@ -56,11 +57,20 @@ pub(crate) const USAGE: &[(&str, &str, &str)] = &[
     ),
     ("keydown", "keydown SPEC", "press a key and hold it"),
     ("keyup", "keyup SPEC", "release a held key"),
-    ("type", "type TEXT", "type text, spaces kept"),
+    (
+        "type",
+        "type [-e] TEXT",
+        "type text, spaces kept; -e: \\n Enter, \\t Tab, \\\\ backslash",
+    ),
     (
         "tap",
         "tap [--nth N] TARGET",
         "left-click the centre of a widget: ok X Y",
+    ),
+    (
+        "hover",
+        "hover [--nth N] TARGET",
+        "move the pointer to the centre of a widget: ok X Y",
     ),
     (
         "find",
@@ -99,8 +109,8 @@ pub(crate) const USAGE: &[(&str, &str, &str)] = &[
     ),
     (
         "screenshot",
-        "screenshot [--annotate] [--crop X Y W H] [--zoom N] PATH",
-        "write a PNG: ok PATH WxH scale S",
+        "screenshot [--annotate] [--no-pointer] [--crop X Y W H] [--zoom N] PATH",
+        "write a PNG: ok PATH WxH scale S (--no-pointer: no hover state)",
     ),
     ("record", "record PATH", "record an H.264 video with ffmpeg"),
     ("record-stop", "record-stop", "finish the recording"),
@@ -116,7 +126,11 @@ pub(crate) const USAGE: &[(&str, &str, &str)] = &[
         "switch the system appearance",
     ),
     ("clip", "clip", "read the clipboard"),
-    ("clip-set", "clip-set TEXT", "write the clipboard"),
+    (
+        "clip-set",
+        "clip-set [-e] TEXT",
+        "write the clipboard; -e as in type",
+    ),
     (
         "drop",
         "drop PATH",
@@ -128,7 +142,7 @@ pub(crate) const USAGE: &[(&str, &str, &str)] = &[
 /// The lines after the command list in `help`.
 pub(crate) fn help_footer() -> Vec<String> {
     vec![
-        "targets: #ID, ~SUBSTRING, TEXT, --nth N".to_owned(),
+        "targets: #ID, ~SUBSTRING, =TEXT, TEXT, --nth N".to_owned(),
         format!("keys: {}", crate::keys::key_names()),
         "coordinates: UI-logical; PNG px = logical x scale".to_owned(),
     ]
@@ -160,6 +174,8 @@ pub(crate) struct Shot {
     /// Logical rectangle to cut out.
     pub(crate) crop: Option<Rectangle>,
     pub(crate) zoom: u32,
+    /// Render without the pointer, so no widget shows hover state.
+    pub(crate) no_pointer: bool,
 }
 
 /// One request line.
@@ -192,8 +208,14 @@ pub(crate) enum Command {
     Key(Keystroke),
     KeyDown(Keystroke),
     KeyUp(Keystroke),
-    Type(String),
+    /// Key presses, one per character; `type -e` turns `\n` and `\t` into
+    /// Enter and Tab.
+    Type(Vec<Keystroke>),
     Tap {
+        target: Target,
+        nth: Option<usize>,
+    },
+    Hover {
         target: Target,
         nth: Option<usize>,
     },
@@ -240,8 +262,12 @@ pub(crate) enum Command {
 /// The options a command accepts: name and number of values.
 pub(crate) type OptionSpec = &'static [(&'static str, usize)];
 
-pub(crate) const SCREENSHOT_OPTIONS: OptionSpec =
-    &[("--annotate", 0), ("--crop", 4), ("--zoom", 1)];
+pub(crate) const SCREENSHOT_OPTIONS: OptionSpec = &[
+    ("--annotate", 0),
+    ("--no-pointer", 0),
+    ("--crop", 4),
+    ("--zoom", 1),
+];
 const NTH_OPTIONS: OptionSpec = &[("--nth", 1)];
 const TIMEOUT_OPTIONS: OptionSpec = &[("--timeout", 1)];
 const TREE_OPTIONS: OptionSpec = &[("--all", 0)];
@@ -437,10 +463,28 @@ impl Command {
                 }
             }
             "type" => {
-                required(rest)?;
-                Command::Type(rest.to_owned())
+                let keystrokes = match escaped(rest) {
+                    Some(text) => {
+                        required(text)?;
+                        value!(unescape(text))?
+                            .chars()
+                            .map(|c| match c {
+                                '\n' => Keystroke::named(Named::Enter, Modifiers::empty()),
+                                '\t' => Keystroke::named(Named::Tab, Modifiers::empty()),
+                                c => Keystroke::character(c, Modifiers::empty()),
+                            })
+                            .collect()
+                    }
+                    None => {
+                        required(rest)?;
+                        rest.chars()
+                            .map(|c| Keystroke::character(c, Modifiers::empty()))
+                            .collect()
+                    }
+                };
+                Command::Type(keystrokes)
             }
-            "tap" | "find" => {
+            "tap" | "hover" | "find" => {
                 let (opts, target) = options(NTH_OPTIONS)?;
                 required(target)?;
                 let mut nth = None;
@@ -448,10 +492,10 @@ impl Command {
                     nth = Some(value!(positive(values[0], "--nth"))?);
                 }
                 let target = Target::parse(target);
-                if name == "tap" {
-                    Command::Tap { target, nth }
-                } else {
-                    Command::Find { target, nth }
+                match name {
+                    "tap" => Command::Tap { target, nth },
+                    "hover" => Command::Hover { target, nth },
+                    _ => Command::Find { target, nth },
                 }
             }
             "find-all" => {
@@ -504,10 +548,12 @@ impl Command {
                     annotate: false,
                     crop: None,
                     zoom: 1,
+                    no_pointer: false,
                 };
                 for (option, values) in opts {
                     match option {
                         "--annotate" => shot.annotate = true,
+                        "--no-pointer" => shot.no_pointer = true,
                         "--crop" => {
                             let [x, y, w, h] = [values[0], values[1], values[2], values[3]];
                             let origin = value!(point(x, y))?;
@@ -555,7 +601,10 @@ impl Command {
                 arity(0, 0)?;
                 Command::Clip
             }
-            "clip-set" => Command::ClipSet(rest.to_owned()),
+            "clip-set" => Command::ClipSet(match escaped(rest) {
+                Some(text) => value!(unescape(text))?,
+                None => rest.to_owned(),
+            }),
             "drop" => {
                 required(rest)?;
                 Command::Drop(PathBuf::from(rest))
@@ -640,6 +689,35 @@ fn timeout_from(opts: &Options<'_>, default_ms: u64) -> Result<Duration, String>
     Ok(timeout)
 }
 
+/// The text after a leading `-e` flag of `type` and `clip-set`.
+fn escaped(rest: &str) -> Option<&str> {
+    if rest == "-e" {
+        Some("")
+    } else {
+        rest.strip_prefix("-e ")
+    }
+}
+
+/// `\n` newline, `\t` tab, `\\` backslash.
+fn unescape(text: &str) -> Result<String, String> {
+    let mut out = String::with_capacity(text.len());
+    let mut chars = text.chars();
+    while let Some(c) = chars.next() {
+        if c != '\\' {
+            out.push(c);
+            continue;
+        }
+        match chars.next() {
+            Some('n') => out.push('\n'),
+            Some('t') => out.push('\t'),
+            Some('\\') => out.push('\\'),
+            Some(other) => return Err(format!("unknown escape \\{other} (use \\n, \\t, \\\\)")),
+            None => return Err("unknown escape \\ at end of text (use \\n, \\t, \\\\)".to_owned()),
+        }
+    }
+    Ok(out)
+}
+
 fn point(x: &str, y: &str) -> Result<Point, String> {
     Ok(Point::new(number(x)?, number(y)?))
 }
@@ -684,7 +762,7 @@ mod tests {
         );
         assert_eq!(
             Command::parse("type").unwrap_err(),
-            "type: missing argument; usage: type TEXT"
+            "type: missing argument; usage: type [-e] TEXT"
         );
         assert_eq!(
             Command::parse("tap --nth 2").unwrap_err(),
@@ -775,6 +853,21 @@ mod tests {
     }
 
     #[test]
+    fn hover_takes_a_target_like_tap() {
+        assert_eq!(
+            Command::parse("hover --nth 2 =#rows").unwrap(),
+            Command::Hover {
+                target: Target::Text("#rows".into()),
+                nth: Some(2)
+            }
+        );
+        assert_eq!(
+            Command::parse("hover").unwrap_err(),
+            "hover: missing argument; usage: hover [--nth N] TARGET"
+        );
+    }
+
+    #[test]
     fn wait_and_tree_options() {
         assert_eq!(
             Command::parse("wait-for --timeout 300 Saved Ada").unwrap(),
@@ -858,12 +951,18 @@ mod tests {
             panic!("not a screenshot");
         };
         assert!(shot.annotate);
+        assert!(!shot.no_pointer);
         assert_eq!(shot.zoom, 4);
         assert_eq!(
             shot.crop,
             Some(Rectangle::new(Point::ORIGIN, Size::new(200.0, 80.0)))
         );
         assert_eq!(shot.path, PathBuf::from("/tmp/a b.png"));
+        let Command::Screenshot(shot) = Command::parse("screenshot --no-pointer x.png").unwrap()
+        else {
+            panic!("not a screenshot");
+        };
+        assert!(shot.no_pointer && shot.zoom == 1);
         assert_eq!(
             Command::parse("screenshot --zoom 9 x.png").unwrap_err(),
             "screenshot: zoom must be 1-8"
@@ -881,11 +980,64 @@ mod tests {
                 Modifiers::CTRL | Modifiers::SHIFT
             )
         );
+        let typed = |text: &str| {
+            Command::Type(
+                text.chars()
+                    .map(|c| Keystroke::character(c, Modifiers::empty()))
+                    .collect(),
+            )
+        };
         assert_eq!(
             Command::parse("type hello  world").unwrap(),
-            Command::Type("hello  world".into())
+            typed("hello  world")
         );
+        // Without -e a backslash is just a character, and so is a leading "-e" word.
+        assert_eq!(Command::parse("type a\\nb").unwrap(), typed("a\\nb"));
+        assert_eq!(Command::parse("type -ex").unwrap(), typed("-ex"));
         assert!(Command::parse("click 1 2 left hyper").is_err());
+    }
+
+    #[test]
+    fn escapes_in_type_and_clip_set() {
+        let enter = Keystroke::named(Named::Enter, Modifiers::empty());
+        let tab = Keystroke::named(Named::Tab, Modifiers::empty());
+        let ch = |c| Keystroke::character(c, Modifiers::empty());
+        assert_eq!(
+            Command::parse("type -e a\\nb\\t\\\\").unwrap(),
+            Command::Type(vec![ch('a'), enter.clone(), ch('b'), tab, ch('\\')])
+        );
+        assert_eq!(
+            Command::parse("type -e Ada\\n").unwrap(),
+            Command::Type(vec![ch('A'), ch('d'), ch('a'), enter.clone()])
+        );
+        assert_eq!(
+            Command::parse("type -e a  b").unwrap(),
+            Command::Type(vec![ch('a'), ch(' '), ch(' '), ch('b')])
+        );
+        assert_eq!(
+            Command::parse("type -e a\\xb").unwrap_err(),
+            "type: unknown escape \\x (use \\n, \\t, \\\\)"
+        );
+        assert_eq!(
+            Command::parse("type -e a\\").unwrap_err(),
+            "type: unknown escape \\ at end of text (use \\n, \\t, \\\\)"
+        );
+        assert_eq!(
+            Command::parse("type -e").unwrap_err(),
+            "type: missing argument; usage: type [-e] TEXT"
+        );
+        assert_eq!(
+            Command::parse("clip-set -e a\\nb\\\\").unwrap(),
+            Command::ClipSet("a\nb\\".into())
+        );
+        assert_eq!(
+            Command::parse("clip-set a\\nb").unwrap(),
+            Command::ClipSet("a\\nb".into())
+        );
+        assert_eq!(
+            Command::parse("clip-set -e \\q").unwrap_err(),
+            "clip-set: unknown escape \\q (use \\n, \\t, \\\\)"
+        );
     }
 
     #[test]

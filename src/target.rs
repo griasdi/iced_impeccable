@@ -1,5 +1,5 @@
 //! The widget inventory: what the interface reports to a widget operation,
-//! the target grammar that addresses it (`#ID`, `~SUBSTRING`, exact text),
+//! the target grammar that addresses it (`#ID`, `~SUBSTRING`, `=TEXT`, exact text),
 //! and the text form of nodes and match errors.
 
 use std::fmt;
@@ -15,7 +15,8 @@ pub(crate) enum Target {
     Id(String),
     /// `~SUBSTRING`: text that contains the substring.
     Contains(String),
-    /// Anything else: text that is exactly this.
+    /// `=TEXT` or anything else: text that is exactly this. `=` lets the text
+    /// start with `#`, `~` or `=`.
     Text(String),
 }
 
@@ -25,6 +26,8 @@ impl Target {
             Self::Id(id.to_owned())
         } else if let Some(sub) = text.strip_prefix('~').filter(|sub| !sub.is_empty()) {
             Self::Contains(sub.to_owned())
+        } else if let Some(exact) = text.strip_prefix('=').filter(|exact| !exact.is_empty()) {
+            Self::Text(exact.to_owned())
         } else {
             Self::Text(text.to_owned())
         }
@@ -55,6 +58,7 @@ impl fmt::Display for Target {
         match self {
             Self::Id(id) => write!(f, "#{id}"),
             Self::Contains(sub) => write!(f, "~{sub}"),
+            Self::Text(text) if text.starts_with(['#', '~', '=']) => write!(f, "={text}"),
             Self::Text(text) => f.write_str(text),
         }
     }
@@ -323,29 +327,40 @@ pub(crate) fn escape(text: &str) -> String {
 }
 
 /// Resolves a target to one node for `find` and `tap`, or the error reply
-/// without its `err ` prefix.
+/// without its `err ` prefix. Without `nth`, only visible matches count:
+/// a match scrolled out of view does not make a visible one ambiguous.
 pub(crate) fn pick<'a>(
     nodes: &'a [Node],
     target: &Target,
     nth: Option<usize>,
 ) -> Result<&'a Node, String> {
     let matches: Vec<&Node> = nodes.iter().filter(|n| target.matches(n)).collect();
-    let chosen = match (nth, matches.len()) {
-        (_, 0) => return Err(not_found(nodes, target)),
-        (Some(n), len) => *matches
+    if matches.is_empty() {
+        return Err(not_found(nodes, target));
+    }
+    let chosen = match nth {
+        Some(n) => *matches
             .get(n.wrapping_sub(1))
-            .ok_or_else(|| format!("only {len} matches for {target}"))?,
-        (None, 1) => matches[0],
-        (None, n) => {
-            let listed: Vec<String> = matches
+            .ok_or_else(|| format!("only {} matches for {target}", matches.len()))?,
+        None => {
+            let visible: Vec<&Node> = matches
                 .iter()
-                .take(5)
-                .map(|m| rect_words(m.rect()))
+                .copied()
+                .filter(|n| n.visible.is_some())
                 .collect();
-            return Err(format!(
-                "ambiguous: {n} matches (use --nth): {}",
-                listed.join("; ")
-            ));
+            match visible.as_slice() {
+                [] => matches[0],
+                [only] => only,
+                many => {
+                    let listed: Vec<String> =
+                        many.iter().take(5).map(|m| rect_words(m.rect())).collect();
+                    return Err(format!(
+                        "ambiguous: {} matches (use --nth): {}",
+                        many.len(),
+                        listed.join("; ")
+                    ));
+                }
+            }
         }
     };
     if chosen.visible.is_none() {
@@ -431,6 +446,25 @@ mod tests {
         // A bare sigil is text, not an empty id.
         assert_eq!(Target::parse("#"), Target::Text("#".into()));
         assert_eq!(Target::parse("~"), Target::Text("~".into()));
+        // `=` quotes text that starts with a sigil.
+        assert_eq!(Target::parse("=Save"), Target::Text("Save".into()));
+        assert_eq!(Target::parse("=#x"), Target::Text("#x".into()));
+        assert_eq!(Target::parse("=~x"), Target::Text("~x".into()));
+        assert_eq!(Target::parse("=="), Target::Text("=".into()));
+        assert_eq!(Target::parse("="), Target::Text("=".into()));
+    }
+
+    #[test]
+    fn target_display_round_trips() {
+        for text in ["Save", "#x", "~x", "=", "==", "=#x", "a=b"] {
+            let target = Target::Text(text.into());
+            assert_eq!(Target::parse(&target.to_string()), target, "{text}");
+        }
+        for target in [Target::Id("a".into()), Target::Contains("b".into())] {
+            assert_eq!(Target::parse(&target.to_string()), target);
+        }
+        assert_eq!(Target::Text("#x".into()).to_string(), "=#x");
+        assert_eq!(Target::Text("Save".into()).to_string(), "Save");
     }
 
     #[test]
@@ -471,6 +505,35 @@ mod tests {
         assert_eq!(
             pick(&nodes, &Target::parse("sav"), None).unwrap_err(),
             "not found: sav; similar: \"Save\""
+        );
+    }
+
+    #[test]
+    fn not_found_names_text_targets_unambiguously() {
+        let nodes = vec![node(Kind::Text, None, (0.0, 0.0, 40.0, 20.0), Some("x"))];
+        assert!(not_found(&nodes, &Target::Text("#x".into())).starts_with("not found: =#x"),);
+    }
+
+    #[test]
+    fn pick_ignores_hidden_matches_without_nth() {
+        let mut nodes = vec![
+            node(Kind::Text, None, (0.0, 900.0, 40.0, 20.0), Some("Item")),
+            node(Kind::Text, None, (0.0, 30.0, 40.0, 20.0), Some("Item")),
+            node(Kind::Text, None, (0.0, 120.0, 40.0, 20.0), Some("Gone")),
+            node(Kind::Text, None, (0.0, 150.0, 40.0, 20.0), Some("Gone")),
+        ];
+        nodes[0].visible = None;
+        nodes[2].visible = None;
+        nodes[3].visible = None;
+        let item = Target::parse("Item");
+        assert_eq!(pick(&nodes, &item, None).unwrap().bounds.y, 30.0);
+        assert_eq!(
+            pick(&nodes, &Target::parse("Gone"), None).unwrap_err(),
+            "not visible: 0 120 40 20 (scroll it into view)"
+        );
+        assert_eq!(
+            pick(&nodes, &item, Some(1)).unwrap_err(),
+            "not visible: 0 900 40 20 (scroll it into view)"
         );
     }
 

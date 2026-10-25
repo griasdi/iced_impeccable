@@ -5,8 +5,9 @@
 //! Tasks and subscriptions run on the program's executor exactly as in a
 //! windowed run, and every input event is broadcast to the subscriptions, so
 //! shortcuts registered through `iced::event::listen_with` fire here too.
-//! Screenshots are drawn with the real cursor, so hover states show; a
-//! recording additionally paints the pointer.
+//! Screenshots are drawn with the real cursor, so hover states show (unless
+//! `--no-pointer`), but without a pointer sprite; a recording additionally
+//! paints the pointer.
 
 use std::collections::VecDeque;
 use std::io::{Read, Write};
@@ -33,7 +34,7 @@ use iced_selector::Selector;
 use crate::args::HostArgs;
 use crate::channel::{self, Inflight};
 use crate::image::{self, Frame};
-use crate::keys::{Keystroke, key_down_events, key_events, key_up_events};
+use crate::keys::{key_down_events, key_events, key_up_events};
 use crate::protocol::{self, Command, Request, Shot};
 use crate::target::{self, Node, Target};
 
@@ -227,6 +228,8 @@ struct Host<A: Program> {
     quit_forced: bool,
     exit: Option<i32>,
     recording: Option<Recording>,
+    /// The modifiers `keydown` holds, until `keyup` releases them.
+    held: Modifiers,
 }
 
 /// One pretend window.
@@ -453,6 +456,7 @@ where
             quit_forced: false,
             exit: None,
             recording: None,
+            held: Modifiers::empty(),
         };
         // An application's window exists before it boots; a daemon opens its
         // own through `window::open`.
@@ -1041,13 +1045,19 @@ where
                 ],
                 Duration::ZERO,
             ),
-            Command::Key(keystroke) => self.input(id, key_events(&keystroke)),
-            Command::KeyDown(keystroke) => self.input(id, key_down_events(&keystroke)),
-            Command::KeyUp(keystroke) => self.input(id, key_up_events(&keystroke)),
-            Command::Type(text) => {
-                let events: Vec<Event> = text
-                    .chars()
-                    .flat_map(|c| key_events(&Keystroke::character(c, Modifiers::empty())))
+            Command::Key(keystroke) => self.input(id, key_events(&keystroke, self.held)),
+            Command::KeyDown(keystroke) => {
+                self.held |= keystroke.modifiers;
+                self.input(id, key_down_events(&keystroke, self.held))
+            }
+            Command::KeyUp(keystroke) => {
+                self.held -= keystroke.modifiers;
+                self.input(id, key_up_events(&keystroke, self.held))
+            }
+            Command::Type(keystrokes) => {
+                let events: Vec<Event> = keystrokes
+                    .iter()
+                    .flat_map(|k| key_events(k, self.held))
                     .collect();
                 self.input(id, events)
             }
@@ -1062,6 +1072,17 @@ where
                             mouse::Button::Left,
                             Modifiers::empty(),
                         );
+                        format!("ok {x} {y}")
+                    }
+                    Err(e) => format!("err {e}"),
+                }
+            }
+            Command::Hover { target, nth } => {
+                let nodes = self.inventory(id);
+                match target::pick(&nodes, &target, nth) {
+                    Ok(node) => {
+                        let (x, y) = target::centre(node.rect());
+                        let _ = self.pointer(id, vec![moved(Point::new(x, y))], Duration::ZERO);
                         format!("ok {x} {y}")
                     }
                     Err(e) => format!("err {e}"),
@@ -1248,10 +1269,12 @@ where
         if !modifiers.is_empty() {
             events.insert(
                 0,
-                Event::Keyboard(iced::keyboard::Event::ModifiersChanged(modifiers)),
+                Event::Keyboard(iced::keyboard::Event::ModifiersChanged(
+                    modifiers | self.held,
+                )),
             );
             events.push(Event::Keyboard(iced::keyboard::Event::ModifiersChanged(
-                Modifiers::empty(),
+                self.held,
             )));
         }
         self.pointer(id, events, Duration::ZERO)
@@ -1367,7 +1390,7 @@ where
     /// Render, annotate, crop, zoom, write.
     fn screenshot_command(&mut self, id: window::Id, shot: Shot) -> String {
         let scale = self.total_scale(id);
-        let Some(mut frame) = self.render(id) else {
+        let Some(mut frame) = self.render(id, !shot.no_pointer) else {
             return "err window closed".to_owned();
         };
         let mut lines = Vec::new();
@@ -1409,12 +1432,18 @@ where
         out
     }
 
-    /// Draws a frame of the window with its cursor and reads it back as
-    /// RGBA; `None` once the window is closed.
-    fn render(&mut self, id: window::Id) -> Option<Frame> {
+    /// Draws a frame of the window and reads it back as RGBA; `None` once the
+    /// window is closed. Widgets see the window's cursor, or none when
+    /// `pointer` is false.
+    fn render(&mut self, id: window::Id, pointer: bool) -> Option<Frame> {
         let theme = self.theme(id);
         let style = self.program.style(&self.state, &theme);
-        let cursor = self.win(id)?.cursor;
+        let cursor = if pointer {
+            self.win(id)?.cursor
+        } else {
+            self.win(id)?;
+            mouse::Cursor::Unavailable
+        };
         let mut messages = Vec::new();
         self.with_ui(id, |ui, renderer, clipboard| {
             let _ = ui.update(
@@ -1534,7 +1563,7 @@ where
             return;
         }
         let scale = self.total_scale(id);
-        let Some(mut frame) = self.render(id) else {
+        let Some(mut frame) = self.render(id, true) else {
             return;
         };
         if let Some(window) = self.win(id)
@@ -1707,7 +1736,7 @@ where
             }
             Window::Screenshot(id, sender) => {
                 let scale = self.total_scale(id);
-                if let Some(frame) = self.render(id) {
+                if let Some(frame) = self.render(id, true) {
                     let _ = sender.send(window::Screenshot::new(frame.rgba, frame.size, scale));
                 }
             }

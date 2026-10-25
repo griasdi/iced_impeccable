@@ -9,6 +9,7 @@
 use std::path::PathBuf;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use iced::keyboard::Modifiers;
 use iced::widget::{
     Space, button, column, container, pick_list, progress_bar, row, scrollable, text, text_input,
 };
@@ -36,6 +37,8 @@ enum Message {
     Density(Density),
     Reset,
     Dropped(PathBuf),
+    Mods(Modifiers),
+    Hotkey,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -68,6 +71,8 @@ struct Demo {
     /// When the spinner was switched on.
     spinning: Option<Instant>,
     phase: f32,
+    /// The modifiers held down, as the keyboard last reported them.
+    mods: Modifiers,
 }
 
 impl Drop for Demo {
@@ -86,6 +91,7 @@ impl Demo {
             density: Density::Comfortable,
             spinning: None,
             phase: 0.0,
+            mods: Modifiers::empty(),
         }
     }
 
@@ -113,6 +119,8 @@ impl Demo {
                 self.name.clear();
                 self.status = None;
             }
+            Message::Mods(modifiers) => self.mods = modifiers,
+            Message::Hotkey => self.status = Some("Hotkey".into()),
             Message::Dropped(path) => {
                 let name = path.file_name().map_or_else(
                     || path.display().to_string(),
@@ -126,11 +134,11 @@ impl Demo {
 
     fn subscription(&self) -> Subscription<Message> {
         let tick = iced::time::every(Duration::from_secs(1)).map(|_| Message::Tick);
-        let dropped = iced::event::listen_with(dropped);
+        let events = iced::event::listen_with(events);
         if self.spinning.is_some() {
-            Subscription::batch([tick, dropped, iced::window::frames().map(Message::Frame)])
+            Subscription::batch([tick, events, iced::window::frames().map(Message::Frame)])
         } else {
-            Subscription::batch([tick, dropped])
+            Subscription::batch([tick, events])
         }
     }
 
@@ -161,6 +169,7 @@ impl Demo {
             ]
             .spacing(8),
         ]
+        .push(text(format!("Mods {}", modifier_names(self.mods))))
         .push(self.status.as_deref().map(text))
         .push(
             self.spinning
@@ -176,6 +185,8 @@ impl Demo {
         )
         .id("rows")
         .height(Length::Fill);
+        // The text "#rows" next to the id "rows": `=#rows` finds the text.
+        let rows = column![text("#rows"), rows].spacing(4).height(Length::Fill);
 
         let mut body = row![form, rows].spacing(24).height(Length::Fill);
         if self.settings {
@@ -196,11 +207,38 @@ impl Demo {
     }
 }
 
-/// A file dropped onto the window.
-fn dropped(event: iced::Event, _: iced::event::Status, _: iced::window::Id) -> Option<Message> {
+/// Window and keyboard events the demo reacts to: a dropped file, the held
+/// modifiers, and Ctrl+K by its physical key.
+fn events(event: iced::Event, _: iced::event::Status, _: iced::window::Id) -> Option<Message> {
+    use iced::keyboard::Event;
+    use iced::keyboard::key::{Code, Physical};
     match event {
         iced::Event::Window(iced::window::Event::FileDropped(path)) => Some(Message::Dropped(path)),
+        iced::Event::Keyboard(Event::ModifiersChanged(modifiers)) => Some(Message::Mods(modifiers)),
+        iced::Event::Keyboard(Event::KeyPressed {
+            physical_key: Physical::Code(Code::KeyK),
+            modifiers,
+            ..
+        }) if modifiers.control() => Some(Message::Hotkey),
         _ => None,
+    }
+}
+
+/// The held modifiers as words, or `none`.
+fn modifier_names(modifiers: Modifiers) -> String {
+    let names: Vec<&str> = [
+        (modifiers.control(), "ctrl"),
+        (modifiers.shift(), "shift"),
+        (modifiers.alt(), "alt"),
+        (modifiers.logo(), "super"),
+    ]
+    .into_iter()
+    .filter_map(|(held, name)| held.then_some(name))
+    .collect();
+    if names.is_empty() {
+        "none".to_owned()
+    } else {
+        names.join(" ")
     }
 }
 

@@ -149,27 +149,37 @@ pub(crate) fn zoom(frame: &Frame, n: u32) -> Frame {
     }
 }
 
-/// Halves both sides with a 2x2 box filter.
-pub(crate) fn halve(frame: &Frame) -> Frame {
+/// Scales `frame` down to `size` (never larger than the source) by averaging
+/// the source box each destination pixel covers.
+pub(crate) fn shrink(frame: &Frame, size: Size<u32>) -> Frame {
     let (w, h) = (frame.size.width as usize, frame.size.height as usize);
-    let (hw, hh) = ((w / 2).max(1), (h / 2).max(1));
-    let mut rgba = Vec::with_capacity(hw * hh * 4);
-    for y in 0..hh {
-        for x in 0..hw {
+    let dw = (size.width as usize).clamp(1, w.max(1));
+    let dh = (size.height as usize).clamp(1, h.max(1));
+    let bounds = |d: usize, source: usize, dest: usize| {
+        let start = d * source / dest;
+        let end = ((d + 1) * source).div_ceil(dest).min(source).max(start + 1);
+        (start, end)
+    };
+    let mut rgba = Vec::with_capacity(dw * dh * 4);
+    for dy in 0..dh {
+        let (y0, y1) = bounds(dy, h, dh);
+        for dx in 0..dw {
+            let (x0, x1) = bounds(dx, w, dw);
+            let n = ((x1 - x0) * (y1 - y0)) as u64;
             for c in 0..4 {
-                let mut sum = 0u32;
-                for (dx, dy) in [(0, 0), (1, 0), (0, 1), (1, 1)] {
-                    let sx = (x * 2 + dx).min(w - 1);
-                    let sy = (y * 2 + dy).min(h - 1);
-                    sum += u32::from(frame.rgba[(sy * w + sx) * 4 + c]);
+                let mut sum = 0u64;
+                for y in y0..y1 {
+                    for x in x0..x1 {
+                        sum += u64::from(frame.rgba[(y * w + x) * 4 + c]);
+                    }
                 }
-                rgba.push(((sum + 2) / 4) as u8);
+                rgba.push(((sum + n / 2) / n) as u8);
             }
         }
     }
     Frame {
         rgba,
-        size: Size::new(hw as u32, hh as u32),
+        size: Size::new(dw as u32, dh as u32),
     }
 }
 
@@ -292,9 +302,10 @@ pub(crate) fn draw_pointer(frame: &mut Frame, at: Point, scale: f32, pressed: bo
 const GUTTER: u32 = 16;
 const LABEL: u32 = 20;
 
-/// Lays images out in a grid of equal cells, each under a label strip. The
-/// images are halved until the sheet is at most `max_width` wide; labels and
-/// gutters keep their size, so the labels stay readable.
+/// Lays images out in a grid of equal cells, each under a label strip. Images
+/// wider than a cell are shrunk to it, keeping their aspect ratio, so the
+/// sheet is at most `max_width` wide; labels and gutters keep their size, so
+/// the labels stay readable, and narrower images stay as they are.
 pub(crate) fn sheet(
     images: &[(String, Frame)],
     cols: Option<usize>,
@@ -309,23 +320,23 @@ pub(crate) fn sheet(
         .clamp(1, n);
     let rows = n.div_ceil(cols);
     let layout_width = |cell_w: u32| GUTTER + cols as u32 * (cell_w + GUTTER);
-    let mut cell_w = images.iter().map(|(_, f)| f.size.width).max().unwrap_or(1);
-    let mut halvings = 0;
-    while layout_width(cell_w) > max_width && cell_w > 1 {
-        cell_w = (cell_w / 2).max(1);
-        halvings += 1;
-    }
+    let widest = images.iter().map(|(_, f)| f.size.width).max().unwrap_or(1);
+    let cell_w = widest
+        .min((max_width.saturating_sub(GUTTER) / cols as u32).saturating_sub(GUTTER))
+        .max(1);
     let images: Vec<(&str, Frame)> = images
         .iter()
         .map(|(label, frame)| {
-            let mut frame = frame.clone();
-            for _ in 0..halvings {
-                frame = halve(&frame);
-            }
+            let (w, h) = (u64::from(frame.size.width), u64::from(frame.size.height));
+            let frame = if w > u64::from(cell_w) {
+                let height = ((h * u64::from(cell_w) * 2 + w) / (2 * w)).max(1);
+                shrink(frame, Size::new(cell_w, height as u32))
+            } else {
+                frame.clone()
+            };
             (label.as_str(), frame)
         })
         .collect();
-    let cell_w = images.iter().map(|(_, f)| f.size.width).max().unwrap_or(1);
     let cell_h = images.iter().map(|(_, f)| f.size.height).max().unwrap_or(1);
     let width = layout_width(cell_w);
     let height = GUTTER + rows as u32 * (LABEL + cell_h + GUTTER);
@@ -407,7 +418,7 @@ mod tests {
     }
 
     #[test]
-    fn sheet_dimensions_and_halving() {
+    fn sheet_dimensions_and_shrinking() {
         let images: Vec<(String, Frame)> =
             (0..3).map(|i| (format!("{i}"), frame(100, 50))).collect();
         let s = sheet(&images, None, 10_000).unwrap();
@@ -415,19 +426,50 @@ mod tests {
         assert_eq!(s.size, Size::new(16 + 2 * 116, 16 + 2 * (20 + 50 + 16)));
         let s = sheet(&images, Some(3), 10_000).unwrap();
         assert_eq!(s.size.width, 16 + 3 * 116);
-        // 100 px cells halve twice: 16 + 3 * (50 + 16) = 214 is still wider than 200.
+        // Cells of (200 - 16) / 3 - 16 = 45 px; 50 * 45 / 100 = 22.5 rounds up to 23.
         let s = sheet(&images, Some(3), 200).unwrap();
-        assert_eq!(s.size, Size::new(16 + 3 * (25 + 16), 16 + (20 + 12 + 16)));
+        assert_eq!(s.size, Size::new(16 + 3 * (45 + 16), 16 + (20 + 23 + 16)));
         assert!(sheet(&[], None, 100).is_err());
     }
 
     #[test]
-    fn halve_averages_two_by_two() {
+    fn sheet_shrinks_each_image_independently() {
+        let images = vec![
+            ("wide".to_owned(), frame(400, 200)),
+            ("small".to_owned(), frame(100, 100)),
+        ];
+        // Cells of (348 - 16) / 2 - 16 = 150 px: the wide image shrinks to
+        // 150x75, the small one keeps its 100x100.
+        let s = sheet(&images, Some(2), 348).unwrap();
+        assert_eq!(s.size, Size::new(16 + 2 * (150 + 16), 16 + 20 + 100 + 16));
+    }
+
+    #[test]
+    fn shrink_averages_boxes() {
         let mut f = Frame::new(Size::new(2, 2), [0, 0, 0, 255]);
         f.rgba[0] = 100;
         f.rgba[4] = 200;
-        let h = halve(&f);
-        assert_eq!(h.size, Size::new(1, 1));
-        assert_eq!(h.rgba, vec![75, 0, 0, 255]);
+        let s = shrink(&f, Size::new(1, 1));
+        assert_eq!(s.size, Size::new(1, 1));
+        assert_eq!(s.rgba, vec![75, 0, 0, 255]);
+
+        let mut f = Frame::new(Size::new(4, 2), [0, 0, 0, 255]);
+        for (i, red) in [10, 20, 30, 40, 50, 60, 70, 80].into_iter().enumerate() {
+            f.rgba[i * 4] = red;
+        }
+        let s = shrink(&f, Size::new(2, 1));
+        let reds: Vec<u8> = s.rgba.as_chunks::<4>().0.iter().map(|p| p[0]).collect();
+        assert_eq!((s.size, reds), (Size::new(2, 1), vec![35, 55]));
+
+        // Boxes overlap by a pixel when the sides do not divide.
+        let mut f = Frame::new(Size::new(3, 1), [0, 0, 0, 255]);
+        for (i, red) in [0, 30, 90].into_iter().enumerate() {
+            f.rgba[i * 4] = red;
+        }
+        let s = shrink(&f, Size::new(2, 1));
+        let reds: Vec<u8> = s.rgba.as_chunks::<4>().0.iter().map(|p| p[0]).collect();
+        assert_eq!(reds, vec![15, 60]);
+        // Never larger than the source.
+        assert_eq!(shrink(&f, Size::new(9, 9)).size, Size::new(3, 1));
     }
 }

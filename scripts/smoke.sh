@@ -75,9 +75,13 @@ expect "^ok [0-9]+$" tree
     || { echo "FAIL  tree lists Row 60 as hidden"; failures=$((failures + 1)); }
 expect "^err ambiguous: 2 matches \(use --nth\)" find Save
 expect "^ok [0-9]+ [0-9]+$" tap '#name'
-expect "^ok$" type Ada
-expect "^ok [0-9]+ [0-9]+$" tap --nth 2 Save
+expect "^ok$" type -e 'Ada\n'
 expect "^ok [0-9]+ [0-9]+ [0-9]+ [0-9]+$" wait-for Saved Ada
+expect "^ok [0-9]+ [0-9]+$" tap --nth 2 Save
+expect "^ok [0-9]+ [0-9]+$" hover '#name'
+# `=` is exact text, `#` an id: the demo has a text "#rows" and a scrollable id "rows".
+expect "^ok [0-9]+ [0-9]+ [0-9]+ [0-9]+$" find '=#rows'
+expect "^ok [0-9]+ [0-9]+ [0-9]+ [0-9]+$" find '#rows'
 expect "^err not visible: " find Row 60
 expect '^err not found: Sav; similar: "Save"' find Sav
 expect "^ok [0-9]+ [0-9]+$" tap '#settings'
@@ -92,11 +96,23 @@ expect "^ok$" key left
 expect '^err unknown key "nokey"; keys: ' key nokey
 expect "^ok$" reset
 expect "^ok$" wait-gone Saved Ada
+# A shortcut matched by physical key, and modifiers held across commands.
+expect "^ok$" key ctrl+k
+expect "^ok [0-9]+ [0-9]+ [0-9]+ [0-9]+$" wait-for Hotkey
+expect "^ok$" keydown ctrl+a
+expect "^ok$" keydown shift+b
+expect "^ok$" keyup shift+b
+expect "^ok [0-9]+ [0-9]+ [0-9]+ [0-9]+$" wait-for 'Mods ctrl'
+expect "^ok$" keyup ctrl+a
+expect "^ok [0-9]+ [0-9]+ [0-9]+ [0-9]+$" wait-for 'Mods none'
+expect "^ok$" clip-set -e 'a\nb'
+expect "^ok a$" clip
 expect "^ok$" drop "$dir/notes.txt"
 expect "^ok [0-9]+ [0-9]+ [0-9]+ [0-9]+$" wait-for Dropped notes.txt
 expect '^err unknown command "palette" \(see help\)$' palette
 expect "^ok$" appearance light
 expect "^ok .*/light.png 1100x720 scale 1$" screenshot --annotate "$dir/light.png"
+expect "^ok .*/np.png 1100x720 scale 1$" screenshot --no-pointer "$dir/np.png"
 expect "^ok .*/zoom.png 800x320 scale 1$" screenshot --crop 0 0 200 80 --zoom 4 "$dir/zoom.png"
 expect "^ok 1000 700$" resize 1000 700
 expect "^ok 1100 720$" resize 1100 720
@@ -115,8 +131,8 @@ expect "^ok$" quit
 wait "$host" || { echo "FAIL  host exit status $?"; failures=$((failures + 1)); }
 grep -q 'demo: state dropped' "$dir/host.log" \
     || { echo "FAIL  host dropped the app state at exit"; failures=$((failures + 1)); }
-sheet=$("$target/debug/iced-impeccable" sheet "$dir/sheet.png" "$dir/light.png" "$dir/zoom.png" || true)
-[[ $sheet =~ ^ok\ .*/sheet.png\ [0-9]+x[0-9]+$ ]] && echo "ok    sheet" \
+sheet=$("$target/debug/iced-impeccable" sheet "$dir/sheet.png" "$dir/light.png" "$dir/hidpi.png" || true)
+[[ $sheet =~ ^ok\ .*/sheet.png\ 2560x874$ ]] && echo "ok    sheet" \
     || { echo "FAIL  sheet: $sheet"; failures=$((failures + 1)); }
 
 # Skill install into a repo, with an empty PATH so no agent CLI (and no

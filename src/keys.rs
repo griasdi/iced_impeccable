@@ -58,6 +58,141 @@ const KEYS: &[(&str, Named)] = &[
     ("pgdn", Named::PageDown),
 ];
 
+/// The physical key each named key in [`KEYS`] comes from.
+const NAMED_CODES: &[(Named, Code)] = &[
+    (Named::Enter, Code::Enter),
+    (Named::Escape, Code::Escape),
+    (Named::Tab, Code::Tab),
+    (Named::Backspace, Code::Backspace),
+    (Named::Delete, Code::Delete),
+    (Named::Insert, Code::Insert),
+    (Named::Space, Code::Space),
+    (Named::ArrowUp, Code::ArrowUp),
+    (Named::ArrowDown, Code::ArrowDown),
+    (Named::ArrowLeft, Code::ArrowLeft),
+    (Named::ArrowRight, Code::ArrowRight),
+    (Named::Home, Code::Home),
+    (Named::End, Code::End),
+    (Named::PageUp, Code::PageUp),
+    (Named::PageDown, Code::PageDown),
+    (Named::F1, Code::F1),
+    (Named::F2, Code::F2),
+    (Named::F3, Code::F3),
+    (Named::F4, Code::F4),
+    (Named::F5, Code::F5),
+    (Named::F6, Code::F6),
+    (Named::F7, Code::F7),
+    (Named::F8, Code::F8),
+    (Named::F9, Code::F9),
+    (Named::F10, Code::F10),
+    (Named::F11, Code::F11),
+    (Named::F12, Code::F12),
+];
+
+/// `a`..`z`, in alphabet order.
+const LETTERS: [Code; 26] = [
+    Code::KeyA,
+    Code::KeyB,
+    Code::KeyC,
+    Code::KeyD,
+    Code::KeyE,
+    Code::KeyF,
+    Code::KeyG,
+    Code::KeyH,
+    Code::KeyI,
+    Code::KeyJ,
+    Code::KeyK,
+    Code::KeyL,
+    Code::KeyM,
+    Code::KeyN,
+    Code::KeyO,
+    Code::KeyP,
+    Code::KeyQ,
+    Code::KeyR,
+    Code::KeyS,
+    Code::KeyT,
+    Code::KeyU,
+    Code::KeyV,
+    Code::KeyW,
+    Code::KeyX,
+    Code::KeyY,
+    Code::KeyZ,
+];
+
+/// `0`..`9`.
+const DIGITS: [Code; 10] = [
+    Code::Digit0,
+    Code::Digit1,
+    Code::Digit2,
+    Code::Digit3,
+    Code::Digit4,
+    Code::Digit5,
+    Code::Digit6,
+    Code::Digit7,
+    Code::Digit8,
+    Code::Digit9,
+];
+
+/// What Shift types on each digit key, in the order of [`DIGITS`].
+const SHIFTED_DIGITS: &str = ")!@#$%^&*(";
+
+/// Unshifted character, shifted character and key of a US layout's punctuation keys.
+const PUNCTUATION: &[(char, char, Code)] = &[
+    ('`', '~', Code::Backquote),
+    ('-', '_', Code::Minus),
+    ('=', '+', Code::Equal),
+    ('[', '{', Code::BracketLeft),
+    (']', '}', Code::BracketRight),
+    ('\\', '|', Code::Backslash),
+    (';', ':', Code::Semicolon),
+    ('\'', '"', Code::Quote),
+    (',', '<', Code::Comma),
+    ('.', '>', Code::Period),
+    ('/', '?', Code::Slash),
+];
+
+fn named_code(named: Named) -> Option<Code> {
+    NAMED_CODES
+        .iter()
+        .find(|(n, _)| *n == named)
+        .map(|(_, c)| *c)
+}
+
+fn code_named(code: Code) -> Option<Named> {
+    NAMED_CODES
+        .iter()
+        .find(|(_, c)| *c == code)
+        .map(|(n, _)| *n)
+}
+
+/// The key a US layout types `c` on, with or without Shift.
+fn us_code(c: char) -> Option<Code> {
+    if c.is_ascii_alphabetic() {
+        return Some(LETTERS[usize::from(c.to_ascii_lowercase() as u8 - b'a')]);
+    }
+    if let Some(digit) = c.to_digit(10) {
+        return Some(DIGITS[digit as usize]);
+    }
+    if let Some(digit) = SHIFTED_DIGITS.find(c) {
+        return Some(DIGITS[digit]);
+    }
+    PUNCTUATION
+        .iter()
+        .find(|(plain, shifted, _)| c == *plain || c == *shifted)
+        .map(|(_, _, code)| *code)
+}
+
+/// The character a letter or digit key types without Shift.
+fn code_char(code: Code) -> Option<char> {
+    if let Some(i) = LETTERS.iter().position(|c| *c == code) {
+        return Some(char::from(b'a' + i as u8));
+    }
+    DIGITS
+        .iter()
+        .position(|c| *c == code)
+        .map(|i| char::from(b'0' + i as u8))
+}
+
 /// Every key name `key` accepts, comma separated, for help and errors.
 pub(crate) fn key_names() -> String {
     let mut names: Vec<&str> = KEYS.iter().map(|(name, _)| *name).collect();
@@ -92,13 +227,7 @@ impl Keystroke {
         }
         if let Some(name) = rest.strip_prefix("code:") {
             let code = physical_code(name).ok_or_else(|| format!("unknown key code {name:?}"))?;
-            return Ok(Self {
-                key: Key::Unidentified,
-                modified_key: Key::Unidentified,
-                physical: Physical::Code(code),
-                modifiers,
-                text: None,
-            });
+            return Ok(Self::from_code(code, modifiers));
         }
         let mut chars = rest.chars();
         match (chars.next(), chars.next()) {
@@ -111,8 +240,27 @@ impl Keystroke {
         }
     }
 
+    /// The press of a physical key: named keys and letters or digits carry
+    /// their key and text as well, any other key only its code.
+    fn from_code(code: Code, modifiers: Modifiers) -> Self {
+        if let Some(named) = code_named(code) {
+            return Self::named(named, modifiers);
+        }
+        if let Some(c) = code_char(code) {
+            return Self::character(c, modifiers);
+        }
+        Self {
+            key: Key::Unidentified,
+            modified_key: Key::Unidentified,
+            physical: Physical::Code(code),
+            modifiers,
+            text: None,
+        }
+    }
+
     /// A character key. Shift is applied the way a US layout applies it to
-    /// letters; other characters are taken as given.
+    /// letters; other characters are taken as given. The physical key is the
+    /// one a US layout types the character on, if any.
     pub(crate) fn character(c: char, modifiers: Modifiers) -> Self {
         if c == ' ' {
             return Self::named(Named::Space, modifiers);
@@ -125,17 +273,23 @@ impl Keystroke {
         Self {
             key: Key::Character(bare.to_string().into()),
             modified_key: Key::Character(shifted.to_string().into()),
-            physical: Physical::Unidentified(NativeCode::Unidentified),
+            physical: us_code(c).map_or(
+                Physical::Unidentified(NativeCode::Unidentified),
+                Physical::Code,
+            ),
             modifiers,
             text: types_text(modifiers).then_some(shifted),
         }
     }
 
-    fn named(named: Named, modifiers: Modifiers) -> Self {
+    pub(crate) fn named(named: Named, modifiers: Modifiers) -> Self {
         Self {
             key: Key::Named(named),
             modified_key: Key::Named(named),
-            physical: Physical::Unidentified(NativeCode::Unidentified),
+            physical: named_code(named).map_or(
+                Physical::Unidentified(NativeCode::Unidentified),
+                Physical::Code,
+            ),
             modifiers,
             // Space is the one named key that types something.
             text: (named == Named::Space && types_text(modifiers)).then_some(' '),
@@ -249,24 +403,30 @@ fn physical_code(name: &str) -> Option<Code> {
     table.into_iter().find(|(n, _)| *n == name).map(|(_, c)| c)
 }
 
-/// The modifier change and press a keyboard reports when a key goes down.
-pub(crate) fn key_down_events(keystroke: &Keystroke) -> [Event; 2] {
+/// The modifier change and press a keyboard reports when a key goes down
+/// while the modifiers `held` are already down.
+pub(crate) fn key_down_events(keystroke: &Keystroke, held: Modifiers) -> [Event; 2] {
+    let modifiers = keystroke.modifiers | held;
     [
-        Event::Keyboard(keyboard::Event::ModifiersChanged(keystroke.modifiers)),
+        Event::Keyboard(keyboard::Event::ModifiersChanged(modifiers)),
         Event::Keyboard(keyboard::Event::KeyPressed {
             key: keystroke.key.clone(),
             modified_key: keystroke.modified_key.clone(),
             physical_key: keystroke.physical,
             location: keyboard::Location::Standard,
-            modifiers: keystroke.modifiers,
-            text: keystroke.text.map(|c| c.to_string().into()),
+            modifiers,
+            text: keystroke
+                .text
+                .filter(|_| types_text(modifiers))
+                .map(|c| c.to_string().into()),
             repeat: false,
         }),
     ]
 }
 
-/// The release and modifier change a keyboard reports when a key goes up.
-pub(crate) fn key_up_events(keystroke: &Keystroke) -> [Event; 2] {
+/// The release and modifier change a keyboard reports when a key goes up,
+/// leaving the modifiers `remaining` down.
+pub(crate) fn key_up_events(keystroke: &Keystroke, remaining: Modifiers) -> [Event; 2] {
     [
         Event::Keyboard(keyboard::Event::KeyReleased {
             key: keystroke.key.clone(),
@@ -275,15 +435,15 @@ pub(crate) fn key_up_events(keystroke: &Keystroke) -> [Event; 2] {
             location: keyboard::Location::Standard,
             modifiers: keystroke.modifiers,
         }),
-        Event::Keyboard(keyboard::Event::ModifiersChanged(Modifiers::empty())),
+        Event::Keyboard(keyboard::Event::ModifiersChanged(remaining)),
     ]
 }
 
 /// A key press and release, bracketed by the modifier changes a keyboard
-/// reports around them.
-pub(crate) fn key_events(keystroke: &Keystroke) -> [Event; 4] {
-    let [modifiers, press] = key_down_events(keystroke);
-    let [release, cleared] = key_up_events(keystroke);
+/// reports around them, while the modifiers `held` are down.
+pub(crate) fn key_events(keystroke: &Keystroke, held: Modifiers) -> [Event; 4] {
+    let [modifiers, press] = key_down_events(keystroke, held);
+    let [release, cleared] = key_up_events(keystroke, held);
     [modifiers, press, release, cleared]
 }
 
@@ -356,5 +516,93 @@ mod tests {
         assert_eq!(k.physical, Physical::Code(Code::Backquote));
         assert_eq!(k.text, None);
         assert!(Keystroke::parse("code:Nope").is_err());
+    }
+
+    #[test]
+    fn characters_carry_their_us_layout_key() {
+        let code = |s: &str| Keystroke::parse(s).unwrap().physical;
+        for spec in ["a", "A", "shift+a"] {
+            assert_eq!(code(spec), Physical::Code(Code::KeyA), "{spec}");
+        }
+        assert_eq!(code("!"), Physical::Code(Code::Digit1));
+        assert_eq!(code("1"), Physical::Code(Code::Digit1));
+        assert_eq!(code(")"), Physical::Code(Code::Digit0));
+        assert_eq!(code("?"), Physical::Code(Code::Slash));
+        assert_eq!(code("/"), Physical::Code(Code::Slash));
+        assert_eq!(code("~"), Physical::Code(Code::Backquote));
+        assert_eq!(code("\\"), Physical::Code(Code::Backslash));
+        assert_eq!(code("é"), Physical::Unidentified(NativeCode::Unidentified));
+    }
+
+    #[test]
+    fn named_keys_carry_their_code() {
+        for (spec, expected) in [
+            ("enter", Code::Enter),
+            ("pgdn", Code::PageDown),
+            ("f12", Code::F12),
+            ("space", Code::Space),
+        ] {
+            assert_eq!(
+                Keystroke::parse(spec).unwrap().physical,
+                Physical::Code(expected),
+                "{spec}"
+            );
+        }
+    }
+
+    #[test]
+    fn code_specs_resolve_to_keys() {
+        let k = Keystroke::parse("code:KeyA").unwrap();
+        assert_eq!(k.key, Key::Character("a".into()));
+        assert_eq!(k.text, Some('a'));
+        assert_eq!(k.physical, Physical::Code(Code::KeyA));
+        let k = Keystroke::parse("shift+code:KeyA").unwrap();
+        assert_eq!(k.key, Key::Character("a".into()));
+        assert_eq!(k.modified_key, Key::Character("A".into()));
+        assert_eq!(k.text, Some('A'));
+        assert_eq!(Keystroke::parse("ctrl+code:KeyA").unwrap().text, None);
+        let k = Keystroke::parse("code:ArrowLeft").unwrap();
+        assert_eq!(k.key, Key::Named(Named::ArrowLeft));
+        assert_eq!(k.physical, Physical::Code(Code::ArrowLeft));
+        let k = Keystroke::parse("code:Backquote").unwrap();
+        assert_eq!(k.key, Key::Unidentified);
+    }
+
+    #[test]
+    fn named_codes_round_trip_and_cover_every_key() {
+        for (named, code) in NAMED_CODES {
+            assert_eq!(named_code(*named), Some(*code));
+            assert_eq!(code_named(*code), Some(*named));
+        }
+        for (name, named) in KEYS {
+            assert!(named_code(*named).is_some(), "{name} has no code");
+        }
+    }
+
+    #[test]
+    fn held_modifiers_join_presses_and_stay_after_releases() {
+        let ctrl_a = Keystroke::parse("ctrl+a").unwrap();
+        let [changed, press] = key_down_events(&Keystroke::parse("b").unwrap(), Modifiers::CTRL);
+        assert_eq!(
+            changed,
+            Event::Keyboard(keyboard::Event::ModifiersChanged(Modifiers::CTRL))
+        );
+        let Event::Keyboard(keyboard::Event::KeyPressed {
+            modifiers, text, ..
+        }) = press
+        else {
+            panic!("not a press");
+        };
+        assert_eq!((modifiers, text), (Modifiers::CTRL, None));
+
+        let [release, remaining] = key_up_events(&ctrl_a, Modifiers::SHIFT);
+        let Event::Keyboard(keyboard::Event::KeyReleased { modifiers, .. }) = release else {
+            panic!("not a release");
+        };
+        assert_eq!(modifiers, Modifiers::CTRL);
+        assert_eq!(
+            remaining,
+            Event::Keyboard(keyboard::Event::ModifiersChanged(Modifiers::SHIFT))
+        );
     }
 }

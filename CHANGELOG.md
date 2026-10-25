@@ -16,6 +16,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   agents with the detected ones preselected, updates a stale copy and leaves
   a symlinked skill directory alone.
 - The crate package ships the skill files (`plugin/skills/`).
+- `hover [--nth N] TARGET` moves the pointer to the centre of a widget, for
+  hover states and tooltips: `ok X Y`.
+- `type -e TEXT` and `clip-set -e TEXT` read `\n` (Enter in `type`, newline in
+  `clip-set`), `\t` (Tab) and `\\`; other escapes are errors.
+- Target `=TEXT` is exact text even when it starts with `#`, `~` or `=`.
+- `screenshot --no-pointer` renders as if the pointer were outside the
+  window: no hover state.
 - `wait-idle [--timeout MS] [MS]`: the time `wait-idle` gives up after is
   settable (default 10000 ms, the old fixed value).
 
@@ -55,6 +62,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   block it) and keeps only the first 64 KiB. An app that resizes the window
   during a recording ends it with `err window resized during recording`
   and the path of the video up to that point.
+- Keys carry physical key codes: letters, digits, punctuation and named keys
+  (`key a`, `key enter`, `type` text, `key code:KeyA`) report the US-layout
+  `physical_key`, so shortcuts that match physical keys fire. `code:KeyA`
+  and `code:ArrowLeft` also carry the key and text, other codes only the code.
+- `keydown` modifiers stay held: later `key`, `type`, `click` with modifiers
+  and `keyup` of another key report them, and `keyup` leaves the rest down
+  instead of clearing all modifiers. A held Ctrl, Alt or Super suppresses the
+  text of a key press, like on a keyboard.
+- `find`, `tap` and `hover` without `--nth` ignore matches that are scrolled
+  out of view when exactly one match is visible, instead of reporting an
+  ambiguity.
+- Contact sheets shrink each image to the cell width with an area average,
+  instead of halving every image until the widest fits: images of different
+  sizes (a 1x and a 2x capture) now come out at the same width, and a
+  narrower image keeps its size.
+
+### Changed
+
+- `type` text that starts with the word `-e` is now the escape flag; write
+  `type -e '-e ...'` to type it.
 
 ## [0.2.0] - 2026-10-11
 
