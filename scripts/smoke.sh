@@ -101,6 +101,52 @@ elif [[ $out == 'err '*' is not inside a git repository' ]]; then
 else
     echo "FAIL  install outside a repo: $out"; failures=$((failures + 1))
 fi
+if [[ ${OS:-} != Windows_NT ]]; then
+    # Stub agent CLIs that list the plugin until it is uninstalled: the agent
+    # selection comes before any removal, and only relevant installs go.
+    mkdir -p "$dir/bin" "$dir/repo2/.git"
+    for cli in claude omp; do
+        cat >"$dir/bin/$cli" <<'STUB'
+#!/usr/bin/env bash
+cli=$(basename "$0")
+case "$1 $2" in
+"plugin list")
+    if [[ -e $STUB_DIR/$cli.removed ]]; then
+        [[ $cli == claude ]] && echo '[]' || echo '{"npm":[],"marketplace":[]}'
+    elif [[ $cli == claude ]]; then
+        echo '[{"id":"iced-impeccable@iced-impeccable","scope":"user"}]'
+    else
+        echo '{"npm":[],"marketplace":[{"id":"iced-impeccable@iced-impeccable","scope":"project","entries":[{"scope":"project"}]}]}'
+    fi
+    ;;
+"plugin uninstall")
+    echo "$cli $*" >>"$STUB_DIR/uninstalls"
+    touch "$STUB_DIR/$cli.removed"
+    ;;
+esac
+STUB
+        chmod +x "$dir/bin/$cli"
+    done
+    stub_install() {
+        STUB_DIR=$dir PATH="$dir/bin:/usr/bin:/bin" "$target/debug/iced-impeccable" install "$@" \
+            </dev/null 2>&1 && code=0 || code=$?
+    }
+    out=$(stub_install --yes "$dir/repo2"; echo "exit $code")
+    [[ $out == *'no terminal: pass --agent claude,omp'* && $out == *'exit 2' && ! -e $dir/uninstalls ]] \
+        && echo "ok    install without agents removes nothing" \
+        || { echo "FAIL  install without agents: $out"; failures=$((failures + 1)); }
+    out=$(stub_install --agent omp --yes "$dir/repo2"; echo "exit $code")
+    [[ $out == *'ok omp .omp/skills/iced-impeccable installed'* && $out == *'exit 0' \
+        && $(<"$dir/uninstalls") == 'omp plugin uninstall iced-impeccable@iced-impeccable --scope=project' ]] \
+        && echo "ok    install removes the omp plugin only" \
+        || { echo "FAIL  install --agent omp: $out"; failures=$((failures + 1)); }
+    out=$(stub_install --agent claude --yes "$dir/repo2"; echo "exit $code")
+    [[ $out == *'ok claude .claude/skills/iced-impeccable installed'* && $out == *'exit 0' \
+        && $(<"$dir/uninstalls") == 'omp plugin uninstall iced-impeccable@iced-impeccable --scope=project
+claude plugin uninstall iced-impeccable@iced-impeccable --scope user' ]] \
+        && echo "ok    install removes the claude plugin for claude" \
+        || { echo "FAIL  install --agent claude: $out"; failures=$((failures + 1)); }
+fi
 [[ ! -e $sock ]] || { echo "FAIL  socket left behind"; failures=$((failures + 1)); }
 
 # A daemon with two windows: `windows` lists them, `@N` addresses one.

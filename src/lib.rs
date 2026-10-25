@@ -41,6 +41,20 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use iced::message::{MaybeClone, MaybeDebug};
 
+/// `println!` for client output; a closed stdout pipe (`ctl … | head`) ends the process with 141, as SIGPIPE would.
+macro_rules! say { ($($arg:tt)*) => { $crate::say_line(format_args!($($arg)*)) }; }
+
+pub(crate) fn say_line(args: std::fmt::Arguments<'_>) {
+    use std::io::Write;
+    let mut out = std::io::stdout().lock();
+    if let Err(e) = out.write_fmt(args).and_then(|()| out.write_all(b"\n")) {
+        if e.kind() == std::io::ErrorKind::BrokenPipe {
+            std::process::exit(141)
+        }
+        panic!("failed printing to stdout: {e}");
+    }
+}
+
 mod args;
 mod channel;
 mod client;

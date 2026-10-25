@@ -72,12 +72,18 @@ pub(crate) fn repo_root(start: &Path) -> Result<PathBuf, String> {
         .ok_or_else(|| format!("{} is not inside a git repository", start.display()))
 }
 
-/// The `version:` value of a skill's frontmatter.
+/// The `version:` value of a skill's frontmatter (the block between the
+/// first line `---` and the next one); `None` without frontmatter or value.
 pub(crate) fn skill_version(skill_md: &str) -> Option<&str> {
-    skill_md
-        .lines()
-        .find_map(|line| line.strip_prefix("version: "))
-        .map(str::trim)
+    let mut lines = skill_md.lines();
+    if lines.next()? != "---" {
+        return None;
+    }
+    lines
+        .take_while(|line| *line != "---")
+        .find_map(|line| line.strip_prefix("version:"))
+        .map(|value| value.trim().trim_matches(|c| c == '"' || c == '\''))
+        .filter(|value| !value.is_empty())
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -88,12 +94,23 @@ pub(crate) enum Outcome {
     Symlink,
 }
 
+/// A sibling of `dir` to build or park a copy in; never inside it.
+fn staging(dir: &Path, tag: &str) -> PathBuf {
+    dir.with_file_name(format!(".{SKILL_NAME}.{tag}-{}", std::process::id()))
+}
+
 /// Writes the skill into `dir` (`<root>/<skills_dir>/iced-impeccable`),
-/// replacing a stale copy; a symlinked `dir` stays untouched.
+/// replacing a stale copy; a symlinked `dir` stays untouched. The new copy
+/// is built next to `dir` and swapped in, so a failure leaves the old one.
 pub(crate) fn write_skill(dir: &Path) -> io::Result<Outcome> {
     match fs::symlink_metadata(dir) {
         Err(e) if e.kind() == io::ErrorKind::NotFound => {
-            write_files(dir)?;
+            let new = staging(dir, "new");
+            write_staged(&new)?;
+            if let Err(e) = fs::rename(&new, dir) {
+                let _ = fs::remove_dir_all(&new);
+                return Err(e);
+            }
             Ok(Outcome::Installed)
         }
         Err(e) => Err(e),
@@ -114,11 +131,32 @@ pub(crate) fn write_skill(dir: &Path) -> io::Result<Outcome> {
                 .ok()
                 .and_then(|md| skill_version(&md).map(str::to_owned))
                 .unwrap_or_else(|| "unknown".to_owned());
-            fs::remove_dir_all(dir)?;
-            write_files(dir)?;
+            let new = staging(dir, "new");
+            let old = staging(dir, "old");
+            write_staged(&new)?;
+            let _ = fs::remove_dir_all(&old);
+            if let Err(e) = fs::rename(dir, &old) {
+                let _ = fs::remove_dir_all(&new);
+                return Err(e);
+            }
+            if let Err(e) = fs::rename(&new, dir) {
+                let _ = fs::rename(&old, dir);
+                let _ = fs::remove_dir_all(&new);
+                return Err(e);
+            }
+            let _ = fs::remove_dir_all(&old);
             Ok(Outcome::Updated { from })
         }
     }
+}
+
+/// Writes the skill into `new` after clearing a leftover; a failed write
+/// removes the partial copy.
+fn write_staged(new: &Path) -> io::Result<()> {
+    let _ = fs::remove_dir_all(new);
+    write_files(new).inspect_err(|_| {
+        let _ = fs::remove_dir_all(new);
+    })
 }
 
 fn write_files(dir: &Path) -> io::Result<()> {
@@ -325,6 +363,23 @@ mod tests {
     }
 
     #[test]
+    fn skill_version_reads_only_the_frontmatter() {
+        assert_eq!(
+            skill_version("---\nname: x\nversion: 1.2.3\n---\n"),
+            Some("1.2.3")
+        );
+        assert_eq!(
+            skill_version("---\nversion: \"1.2.3\"\n---\n"),
+            Some("1.2.3")
+        );
+        assert_eq!(skill_version("---\nversion: '1.2.3'\n---\n"), Some("1.2.3"));
+        assert_eq!(skill_version("---\nname: x\n---\nversion: 1.2.3\n"), None);
+        assert_eq!(skill_version("---\nversion:\n---\n"), None);
+        assert_eq!(skill_version("name: x\nversion: 1.2.3\n"), None);
+        assert_eq!(skill_version(""), None);
+    }
+
+    #[test]
     fn write_skill_installs_updates_and_skips_symlinks() {
         let base = temp_dir("write");
         let dir = base.join(SKILL_NAME);
@@ -354,6 +409,12 @@ mod tests {
             Outcome::Updated { .. }
         ));
         assert!(!dir.join("extra.md").exists());
+        let leftovers: Vec<_> = fs::read_dir(&base)
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .filter(|name| name.to_string_lossy().starts_with(".iced-impeccable."))
+            .collect();
+        assert!(leftovers.is_empty(), "{leftovers:?}");
 
         #[cfg(unix)]
         {

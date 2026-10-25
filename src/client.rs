@@ -125,19 +125,19 @@ fn send(socket: &Path, line: &str, wait: Duration) -> bool {
     let line = match absolute_paths(line) {
         Ok(line) => line,
         Err(e) => {
-            println!("err cwd: {e}");
+            say!("err cwd: {e}");
             return false;
         }
     };
     let reply = connect(socket, wait).and_then(|connection| connection.request(&line));
     match reply {
         Ok(reply) => {
-            println!("{reply}");
+            say!("{reply}");
             let first = reply.lines().next().unwrap_or("");
             first == "ok" || first.starts_with("ok ")
         }
         Err(e) => {
-            println!("err {}: {e}", socket.display());
+            say!("err {}: {e}", socket.display());
             false
         }
     }

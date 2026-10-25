@@ -99,7 +99,7 @@ pub fn sheet(args: &[String]) -> i32 {
         match image::read_png(Path::new(path)) {
             Ok(frame) => images.push((label, frame)),
             Err(e) => {
-                println!("err {path}: {e}");
+                say!("err {path}: {e}");
                 return 1;
             }
         }
@@ -107,16 +107,16 @@ pub fn sheet(args: &[String]) -> i32 {
     let sheet = match image::sheet(&images, cols, max_width) {
         Ok(sheet) => sheet,
         Err(e) => {
-            println!("err {e}");
+            say!("err {e}");
             return 1;
         }
     };
     let out = PathBuf::from(out);
     if let Err(e) = image::write_png(&out, &sheet) {
-        println!("err {}: {e}", out.display());
+        say!("err {}: {e}", out.display());
         return 1;
     }
-    println!(
+    say!(
         "ok {} {}x{}",
         out.display(),
         sheet.size.width,
@@ -180,7 +180,7 @@ pub fn install(args: &[String]) -> i32 {
     let root = match install::repo_root(Path::new(dir.unwrap_or("."))) {
         Ok(root) => root,
         Err(e) => {
-            println!("err {e}");
+            say!("err {e}");
             return 1;
         }
     };
@@ -190,7 +190,7 @@ pub fn install(args: &[String]) -> i32 {
     let mut installs = Vec::new();
     for (i, agent) in AGENTS.iter().enumerate() {
         match install::list_installs(agent, &root) {
-            Err(e) => println!("warning: {e}"),
+            Err(e) => eprintln!("warning: {e}"),
             Ok(None) => {}
             Ok(Some(scopes)) => {
                 detected[i] = true;
@@ -198,10 +198,6 @@ pub fn install(args: &[String]) -> i32 {
             }
         }
     }
-    if !installs.is_empty() && remove_plugin(&installs, &root, yes).is_err() {
-        return 1;
-    }
-
     let selected = match chosen {
         Some(list) => list,
         None if io::stdin().is_terminal() => {
@@ -221,6 +217,16 @@ pub fn install(args: &[String]) -> i32 {
         None => return bad("no terminal: pass --agent claude,omp", install_usage()),
     };
 
+    // omp loads `.claude/skills` as well as `.omp/skills` (its `claude` provider), so an omp plugin
+    // collides with any copy; Claude Code loads only `.claude/skills`.
+    let relevant: Vec<Install> = installs
+        .into_iter()
+        .filter(|i| i.agent.name == "omp" || selected.iter().any(|a| std::ptr::eq(*a, i.agent)))
+        .collect();
+    if !relevant.is_empty() && remove_plugin(&relevant, &root, yes).is_err() {
+        return 1;
+    }
+
     let version = install::skill_version(install::skill_md()).unwrap_or("unknown");
     let mut changed = false;
     for agent in selected {
@@ -229,22 +235,26 @@ pub fn install(args: &[String]) -> i32 {
         match install::write_skill(&root.join(agent.skills_dir).join(install::SKILL_NAME)) {
             Ok(Outcome::Installed) => {
                 changed = true;
-                println!("ok {name} {rel} installed {version}");
+                say!("ok {name} {rel} installed {version}");
             }
             Ok(Outcome::Updated { from }) => {
                 changed = true;
-                println!("ok {name} {rel} updated {from} -> {version}");
+                if from == version {
+                    say!("ok {name} {rel} updated {version} (files changed)");
+                } else {
+                    say!("ok {name} {rel} updated {from} -> {version}");
+                }
             }
-            Ok(Outcome::UpToDate) => println!("ok {name} {rel} up to date {version}"),
-            Ok(Outcome::Symlink) => println!("ok {name} {rel} skipped: symlink"),
+            Ok(Outcome::UpToDate) => say!("ok {name} {rel} up to date {version}"),
+            Ok(Outcome::Symlink) => say!("ok {name} {rel} skipped: symlink"),
             Err(e) => {
-                println!("err {name} {rel}: {e}");
+                say!("err {name} {rel}: {e}");
                 return 1;
             }
         }
     }
     if changed {
-        println!("restart the agent session to load the skill");
+        say!("restart the agent session to load the skill");
     }
     0
 }
@@ -252,27 +262,27 @@ pub fn install(args: &[String]) -> i32 {
 /// Asks (unless `yes`) and removes every install, then checks the agents
 /// no longer list the plugin. Errors are printed.
 fn remove_plugin(installs: &[Install], root: &Path, yes: bool) -> Result<(), ()> {
-    println!("the iced-impeccable plugin is installed and would load next to the repo copy:");
+    say!("the iced-impeccable plugin is installed and would load next to the repo copy:");
     for install in installs {
-        println!("  {} {}", install.agent.name, install.scope);
+        say!("  {} {}", install.agent.name, install.scope);
     }
     if !yes {
         if !io::stdin().is_terminal() {
-            println!("err aborted: rerun with --yes to remove it");
+            say!("err aborted: rerun with --yes to remove it");
             return Err(());
         }
         let answer = prompt("remove it? [y/N] ").unwrap_or_default();
         if !(answer.eq_ignore_ascii_case("y") || answer.eq_ignore_ascii_case("yes")) {
-            println!("err aborted");
+            say!("err aborted");
             return Err(());
         }
     }
     for install in installs {
         if let Err(e) = install::uninstall(install, root) {
-            println!("err {e}");
+            say!("err {e}");
             return Err(());
         }
-        println!("removed {} {}", install.agent.name, install.scope);
+        say!("removed {} {}", install.agent.name, install.scope);
     }
     for agent in AGENTS.iter() {
         if !installs.iter().any(|i| std::ptr::eq(i.agent, agent)) {
@@ -285,7 +295,7 @@ fn remove_plugin(installs: &[Install], root: &Path, yes: bool) -> Result<(), ()>
                     agent,
                     scope: scope.clone(),
                 });
-                println!(
+                say!(
                     "err {} still lists the plugin ({scope}); remove it with: {} {}",
                     agent.cli,
                     agent.cli,
@@ -295,7 +305,7 @@ fn remove_plugin(installs: &[Install], root: &Path, yes: bool) -> Result<(), ()>
             }
             Ok(_) => {}
             Err(e) => {
-                println!("err {e}");
+                say!("err {e}");
                 return Err(());
             }
         }
@@ -307,12 +317,12 @@ fn remove_plugin(installs: &[Install], root: &Path, yes: bool) -> Result<(), ()>
 /// nothing.
 fn select_agents(root: &Path, ticked: &mut [bool]) -> Option<Vec<&'static Agent>> {
     loop {
-        println!(
+        say!(
             "install the iced-impeccable skill into {} for:",
             root.display()
         );
         for (i, (agent, on)) in AGENTS.iter().zip(ticked.iter()).enumerate() {
-            println!(
+            say!(
                 "  [{}] {} {:<8}{}/{}",
                 if *on { 'x' } else { ' ' },
                 i + 1,
@@ -322,7 +332,7 @@ fn select_agents(root: &Path, ticked: &mut [bool]) -> Option<Vec<&'static Agent>
             );
         }
         let Some(input) = prompt("number toggles, Enter installs, q quits: ") else {
-            println!("err aborted");
+            say!("err aborted");
             return None;
         };
         match input.as_str() {
@@ -337,16 +347,16 @@ fn select_agents(root: &Path, ticked: &mut [bool]) -> Option<Vec<&'static Agent>
                 );
             }
             "" => {
-                println!("err nothing selected");
+                say!("err nothing selected");
                 return None;
             }
             "q" => {
-                println!("err aborted");
+                say!("err aborted");
                 return None;
             }
             _ => match input.parse::<usize>() {
                 Ok(n) if (1..=ticked.len()).contains(&n) => ticked[n - 1] = !ticked[n - 1],
-                _ => println!("unknown choice {input:?}"),
+                _ => say!("unknown choice {input:?}"),
             },
         }
     }

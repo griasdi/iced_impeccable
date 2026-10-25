@@ -17,6 +17,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   a symlinked skill directory alone.
 - The crate package ships the skill files (`plugin/skills/`).
 
+### Fixed
+
+- `install` now selects the agents before it removes anything, so a run
+  without a terminal and without `--agent` exits 2 with the plugin intact,
+  and it removes only the installs that collide with the chosen agents (an
+  omp plugin always, since omp also loads `.claude/skills`; a Claude Code
+  plugin only when `claude` is chosen).
+- `install` writes the new skill copy next to the old one and swaps it in, so
+  a failed update leaves the installed skill untouched. A same-version update
+  reports `updated VERSION (files changed)`, and the installed version is
+  read from the frontmatter only.
+- `ctl`, `sheet`, `install` and `help` end with exit status 141 instead of
+  panicking when stdout is a closed pipe (`ctl … | head`).
+
 ## [0.2.0] - 2026-10-11
 
 ### Added

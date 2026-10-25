@@ -1,6 +1,8 @@
 //! `iced-impeccable ctl ...`, `iced-impeccable sheet ...`,
 //! `iced-impeccable install ...`, `iced-impeccable help`.
 
+use std::io::Write;
+
 const USAGE: &str =
     "usage: iced-impeccable ctl [--wait MS] [--keep-going] [--window N] <socket> <command> [args...] | -
        iced-impeccable sheet [--cols N] [--labels a,b,c] [--max-width PX] OUT.png IN.png...
@@ -14,7 +16,7 @@ fn main() {
         Some((command, rest)) if command == "sheet" => iced_impeccable::cli::sheet(rest),
         Some((command, rest)) if command == "install" => iced_impeccable::cli::install(rest),
         Some((command, [])) if command == "help" => {
-            println!("{}", iced_impeccable::cli::help());
+            let _ = writeln!(std::io::stdout().lock(), "{}", iced_impeccable::cli::help());
             0
         }
         _ => {
