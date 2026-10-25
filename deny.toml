@@ -11,6 +11,12 @@ ignore = [
     # ttf-parser is unmaintained (no vulnerability), pulled in through
     # cosmic-text -> fontdb. Revisit when upstream drops it.
     "RUSTSEC-2026-0192",
+    # zbus_names, zvariant and zvariant_derive are unmaintained (no
+    # vulnerability, no safe upgrade), pulled in through iced_winit -> mundy
+    # -> zbus. Revisit when upstream moves off them.
+    "RUSTSEC-2026-0370",
+    "RUSTSEC-2026-0371",
+    "RUSTSEC-2026-0372",
 ]
 
 [licenses]
