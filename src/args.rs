@@ -9,6 +9,15 @@ use iced::Size;
 use crate::host::MAX_PHYSICAL;
 use crate::protocol::{parse_appearance, parse_extent, parse_scale};
 
+/// The renderer without `--backend`: the GPU one when compiled in. A backend
+/// that is not compiled in here may still be there, since iced unifies the
+/// features with the app's own; it fails at startup if not.
+const DEFAULT_BACKEND: &str = if cfg!(feature = "wgpu") {
+    "wgpu"
+} else {
+    "tiny-skia"
+};
+
 /// Flags that take a value.
 const VALUE_FLAGS: [&str; 6] = [
     "--control",
@@ -45,7 +54,7 @@ impl HostArgs {
         let mut size = None;
         let mut scale = 1.0;
         let mut appearance = iced::theme::Mode::Dark;
-        let mut backend = "wgpu";
+        let mut backend = DEFAULT_BACKEND;
         let mut clipboard = None;
         let mut args = args.iter();
         while let Some(arg) = args.next() {
@@ -164,6 +173,19 @@ mod tests {
         assert!(HostArgs::parse(&os(&["--control", "a", "--backend", "gl"])).is_err());
         assert!(HostArgs::parse(&os(&["--control", "a", "--clipboard"])).is_err());
         assert!(HostArgs::parse(&os(&["--control"])).is_err());
+    }
+
+    #[test]
+    fn backend_defaults_to_the_first_compiled_in() {
+        let args = HostArgs::parse(&os(&["--control", "a"])).unwrap();
+        assert_eq!(
+            args.backend,
+            if cfg!(feature = "wgpu") {
+                "wgpu"
+            } else {
+                "tiny-skia"
+            }
+        );
     }
 
     #[test]

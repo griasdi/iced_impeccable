@@ -11,7 +11,7 @@ set -euo pipefail
 backend=${1:-tiny-skia}
 cd "$(dirname "$0")/.."
 target=${CARGO_TARGET_DIR:-target}
-cargo build -q --example demo --example multiwin --bin iced-impeccable
+cargo build -q --locked --example demo --example multiwin --bin iced-impeccable
 
 dir=$(mktemp -d)
 if [[ ${OS:-} == Windows_NT ]]; then
@@ -25,7 +25,11 @@ fi
     --backend "$backend" 2>"$dir/host.log" &
 host=$!
 host2=
+cur=$host
 trap 'kill "$host" $host2 2>/dev/null || true; rm -rf "$dir"' EXIT
+# Fail fast with the host's log when it does not come up (a missing renderer, a bad socket).
+"$target/debug/iced-impeccable" ctl --wait 15000 "$sock" info >/dev/null \
+    || { echo "FAIL  host did not start"; cat "$dir/host.log"; exit 1; }
 
 failures=0
 # expect PATTERN COMMAND...: the reply's first line must match PATTERN.
@@ -40,6 +44,7 @@ expect() {
         echo "FAIL  $*"
         echo "      expected /$pattern/, got: ${reply%%$'\n'*}"
         failures=$((failures + 1))
+        kill -0 "$cur" 2>/dev/null || { echo "host died; log:"; cat "$dir/host.log"; exit 1; }
     fi
 }
 
@@ -213,6 +218,7 @@ fi
     --backend "$backend" 2>>"$dir/host.log" &
 host2=$!
 sock=$sock2
+cur=$host2
 expect "^ok 1$" windows
 expect "^ok" wait-for 'main focused: true'
 expect "^ok" tap 'Open second'

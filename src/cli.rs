@@ -1,10 +1,12 @@
 //! The subcommands of the standalone `iced-impeccable` binary, usable from
 //! any other binary as well.
 
+#[cfg(feature = "cli")]
 use std::io::{self, BufRead, IsTerminal, Write};
 use std::path::{Path, PathBuf};
 
 use crate::image;
+#[cfg(feature = "cli")]
 use crate::install::{self, AGENTS, Agent, Install, Outcome};
 use crate::protocol;
 
@@ -125,10 +127,12 @@ pub fn sheet(args: &[String]) -> i32 {
     0
 }
 
+#[cfg(feature = "cli")]
 fn install_usage() -> &'static str {
     "usage: iced-impeccable install [--agent claude,omp] [--yes] [DIR]"
 }
 
+#[cfg(feature = "cli")]
 /// `install [--agent claude,omp] [--yes] [DIR]`: copies the skill into the
 /// git repository containing DIR (default `.`) for the chosen agents, after
 /// removing a marketplace install of the plugin. Prints `ok`/`err` lines;
@@ -259,6 +263,7 @@ pub fn install(args: &[String]) -> i32 {
     0
 }
 
+#[cfg(feature = "cli")]
 /// Asks (unless `yes`) and removes every install, then checks the agents
 /// no longer list the plugin. Errors are printed.
 fn remove_plugin(installs: &[Install], root: &Path, yes: bool) -> Result<(), ()> {
@@ -313,6 +318,7 @@ fn remove_plugin(installs: &[Install], root: &Path, yes: bool) -> Result<(), ()>
     Ok(())
 }
 
+#[cfg(feature = "cli")]
 /// The toggle prompt; `None` (printed) when the user quits or ticks
 /// nothing.
 fn select_agents(root: &Path, ticked: &mut [bool]) -> Option<Vec<&'static Agent>> {
@@ -362,6 +368,7 @@ fn select_agents(root: &Path, ticked: &mut [bool]) -> Option<Vec<&'static Agent>
     }
 }
 
+#[cfg(feature = "cli")]
 /// Prints `question`, reads one trimmed line; `None` on EOF or error.
 fn prompt(question: &str) -> Option<String> {
     print!("{question}");

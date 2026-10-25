@@ -72,6 +72,26 @@ fn main() -> iced::Result {
 - A daemon (`iced::daemon(...)`) is wrapped the same way: `Remote::new(daemon)`.
 - Release builds never enable `remote`.
 
+### Features
+
+The library needs only the renderers the app already uses; `default-features
+= false` drops the `iced-impeccable` binary's code:
+
+- `wgpu`, `tiny-skia`: the renderers `--backend` can select. Name the ones the
+  app's `iced` has too (iced unifies them; a backend that is not compiled in
+  fails at startup). Without `--backend` the host uses `wgpu` when the
+  feature is on, else `tiny-skia`.
+- `x11`, `wayland`: iced's windowing backends, which winit needs on Linux.
+- `cli`: `cli::install` and the `iced-impeccable` binary (adds `serde_json`).
+
+All five are on by default. An app that wants only the host:
+
+```toml
+iced_impeccable = { version = "0.2", optional = true, default-features = false, features = ["wgpu", "tiny-skia"] }
+```
+
+`x11` and `wayland` then come from the app's own `iced`.
+
 ## Run
 
 ```sh

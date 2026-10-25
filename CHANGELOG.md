@@ -96,6 +96,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - `type` text that starts with the word `-e` is now the escape flag; write
   `type -e '-e ...'` to type it.
+- The backends and the installer are cargo features: `wgpu`, `tiny-skia`,
+  `x11`, `wayland` and `cli`, all on by default. With
+  `default-features = false` a library user gets only the renderers it names
+  (`features = ["wgpu", "tiny-skia"]`), no `serde_json` and no installer;
+  `x11`/`wayland` then come from the app's own `iced`; the crate itself
+  enables only iced's `advanced` and `thread-pool` (a futures executor,
+  without which iced does not compile). Without `--backend`
+  the host picks `wgpu` when that feature is on, else `tiny-skia`. The
+  `iced-impeccable` binary requires `cli`. A host that finds no renderer says
+  it may not be compiled in.
 
 ## [0.2.0] - 2026-10-11
 

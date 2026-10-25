@@ -60,6 +60,7 @@ mod channel;
 mod client;
 mod host;
 mod image;
+#[cfg(feature = "cli")]
 mod install;
 mod keys;
 mod protocol;

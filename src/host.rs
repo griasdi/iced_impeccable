@@ -141,7 +141,10 @@ where
         ),
     );
     let Some(renderer) = renderer else {
-        eprintln!("[remote] no {} renderer available", args.backend);
+        eprintln!(
+            "[remote] no {} renderer available (not compiled in, or no adapter; try --backend tiny-skia)",
+            args.backend
+        );
         std::process::exit(1);
     };
 

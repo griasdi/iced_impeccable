@@ -28,23 +28,40 @@ exclude = [
 ]
 
 [dependencies]
-iced = { version = "0.14", features = ["advanced"] }
+# `thread-pool`: iced does not compile without a futures executor.
+iced = { version = "0.14", default-features = false, features = ["advanced", "thread-pool"] }
 iced_runtime = "0.14"
 iced_futures = "0.14"
 iced_selector = "0.14"
 png = "0.18"
 font8x8 = "0.3"
-serde_json = "1"
+serde_json = { version = "1", optional = true }
+
+[features]
+# The renderers are the app's choice: a library user that depends on this
+# crate with `default-features = false` gets only the ones it names (and iced
+# unifies them with the app's own). On Linux winit does not compile without
+# `x11` or `wayland`.
+default = ["wgpu", "tiny-skia", "cli", "x11", "wayland"]
+wgpu = ["iced/wgpu"]
+tiny-skia = ["iced/tiny-skia"]
+x11 = ["iced/x11"]
+wayland = ["iced/wayland"]
+# `cli::install` (the skill installer, reads the agents' JSON) and the
+# `iced-impeccable` binary.
+cli = ["dep:serde_json"]
 
 [target.'cfg(windows)'.dependencies]
 tokio = { version = "1", features = ["rt", "net", "io-util", "time"] }
 
 [dev-dependencies]
 iced = { version = "0.14", features = ["advanced", "tokio"] }
+serde_json = "1"
 
 [[bin]]
 name = "iced-impeccable"
 path = "src/bin/iced-impeccable.rs"
+required-features = ["cli"]
 
 [[example]]
 name = "demo"

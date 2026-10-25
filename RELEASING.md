@@ -21,6 +21,8 @@ cargo semver-checks --baseline-rev "$(git tag --list 'v*' --sort=-v:refname | he
 - `.claude-plugin/marketplace.json`: the plugin entry's `"version"`.
 - `plugin/skills/iced-impeccable/SKILL.md`: frontmatter `version`.
 
+`cargo test --test version` checks that the four agree.
+
 ## 3. Update the CHANGELOG
 
 - Rename `## [Unreleased]` to `## [X.Y.Z] - YYYY-MM-DD` and add a fresh empty
@@ -38,6 +40,8 @@ cargo build --example demo --bin iced-impeccable
 scripts/smoke.sh
 cargo check --target x86_64-pc-windows-gnu --all-targets
 cargo deny --log-level error check
+cargo package --locked
+cargo package --list    # no .claude-plugin, .github, scripts or assets entries
 ```
 
 ## 5. Commit, tag, push
@@ -48,7 +52,15 @@ git tag -a vX.Y.Z -m "Release X.Y.Z"
 git push origin main vX.Y.Z    # origin pushes to doodleshnookie and GitHub
 ```
 
-## 6. Install locally
+## 6. Publish
+
+Once the tag is pushed and CI is green:
+
+```sh
+cargo publish --locked
+```
+
+## 7. Install locally
 
 ```sh
 cargo install --path . --bin iced-impeccable --locked
