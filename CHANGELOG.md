@@ -170,7 +170,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   skill: iced platform reference, headless verification, audit, adapt,
   variants and DESIGN.md mapping.
 
-[Unreleased]: https://github.com/tuco86/iced_impeccable/compare/v0.2.0...HEAD
-[0.2.0]: https://github.com/tuco86/iced_impeccable/releases/tag/v0.2.0
-[0.1.1]: https://github.com/tuco86/iced_impeccable/releases/tag/v0.1.1
-[0.1.0]: https://github.com/tuco86/iced_impeccable/releases/tag/v0.1.0
+[Unreleased]: https://github.com/griasdi/iced_impeccable/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/griasdi/iced_impeccable/releases/tag/v0.2.0
+[0.1.1]: https://github.com/griasdi/iced_impeccable/releases/tag/v0.1.1
+[0.1.0]: https://github.com/griasdi/iced_impeccable/releases/tag/v0.1.0

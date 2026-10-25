@@ -1,6 +1,6 @@
 # iced_impeccable
 
-[![CI](https://github.com/tuco86/iced_impeccable/actions/workflows/ci.yml/badge.svg)](https://github.com/tuco86/iced_impeccable/actions/workflows/ci.yml)
+[![CI](https://github.com/griasdi/iced_impeccable/actions/workflows/ci.yml/badge.svg)](https://github.com/griasdi/iced_impeccable/actions/workflows/ci.yml)
 [![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](#license)
 [![crates.io](https://img.shields.io/crates/v/iced_impeccable.svg)](https://crates.io/crates/iced_impeccable)
 [![docs.rs](https://img.shields.io/docsrs/iced_impeccable)](https://docs.rs/iced_impeccable)
@@ -17,7 +17,7 @@ widget lookups by id or text, waits, screenshots. The app's own tasks and
 subscriptions run unchanged; no window, display server or desktop input is
 involved.
 
-![The demo app, captured headless with screenshot --annotate: every widget the interface reports is outlined and numbered, matching the node lines of tree](https://raw.githubusercontent.com/tuco86/iced_impeccable/main/assets/demo-annotated.png)
+![The demo app, captured headless with screenshot --annotate: every widget the interface reports is outlined and numbered, matching the node lines of tree](https://raw.githubusercontent.com/griasdi/iced_impeccable/main/assets/demo-annotated.png)
 
 *The demo app captured with `screenshot --annotate`: the numbers match the
 node lines `tree` prints, so an agent clicks `tap #settings` or
@@ -233,7 +233,7 @@ Alternative, global through the marketplace. The two ways exclude each other.
 Claude Code:
 
 ```text
-/plugin marketplace add tuco86/iced_impeccable
+/plugin marketplace add griasdi/iced_impeccable
 /plugin install iced-impeccable@iced-impeccable
 ```
 

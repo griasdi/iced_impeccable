@@ -70,8 +70,7 @@ reply line of every command; extend it when a command or reply changes.
 ## Changes and releases
 
 User-visible changes go into `CHANGELOG.md` under `[Unreleased]`. The release
-checklist is `RELEASING.md`. `origin` pushes to both git.doodleshnookie.net
-(private) and GitHub (public); `github` is the GitHub remote alone.
+checklist is `RELEASING.md`. `origin` is github.com/griasdi/iced_impeccable.
 
 ## Commits
 

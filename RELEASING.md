@@ -27,7 +27,7 @@ cargo semver-checks --baseline-rev "$(git tag --list 'v*' --sort=-v:refname | he
 
 - Rename `## [Unreleased]` to `## [X.Y.Z] - YYYY-MM-DD` and add a fresh empty
   `## [Unreleased]` above it.
-- Add `[X.Y.Z]: https://github.com/tuco86/iced_impeccable/releases/tag/vX.Y.Z`
+- Add `[X.Y.Z]: https://github.com/griasdi/iced_impeccable/releases/tag/vX.Y.Z`
   at the bottom.
 
 ## 4. Run every gate
@@ -49,7 +49,7 @@ cargo package --list    # no .claude-plugin, .github, scripts or assets entries
 ```sh
 git commit -am "chore(release): X.Y.Z"
 git tag -a vX.Y.Z -m "Release X.Y.Z"
-git push origin main vX.Y.Z    # origin pushes to doodleshnookie and GitHub
+git push origin main vX.Y.Z
 ```
 
 ## 6. Publish
