@@ -34,12 +34,15 @@ pub(crate) fn run(args: &[String]) -> i32 {
     loop {
         match args {
             [flag, ms, rest @ ..] if flag == "--wait" => {
-                let Ok(ms) = ms.parse::<u64>() else {
-                    eprintln!("--wait {ms:?} is not a number of milliseconds");
-                    eprintln!("{}", usage());
-                    return 2;
+                let wait_ms = match crate::protocol::millis(Some(ms)) {
+                    Ok(ms) => ms,
+                    Err(e) => {
+                        eprintln!("--wait: {e}");
+                        eprintln!("{}", usage());
+                        return 2;
+                    }
                 };
-                wait = Duration::from_millis(ms);
+                wait = wait_ms;
                 args = rest;
             }
             [flag, n, rest @ ..] if flag == "--window" => {

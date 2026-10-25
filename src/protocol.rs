@@ -94,8 +94,8 @@ pub(crate) const USAGE: &[(&str, &str, &str)] = &[
     ),
     (
         "wait-idle",
-        "wait-idle [MS]",
-        "wait for MS quiet: ok idle, ok animating or err timeout",
+        "wait-idle [--timeout MS] [MS]",
+        "wait for MS quiet (default 200): ok idle, ok animating, or err timeout after --timeout (default 10000)",
     ),
     (
         "screenshot",
@@ -214,7 +214,10 @@ pub(crate) enum Command {
         target: Target,
         timeout: Duration,
     },
-    WaitIdle(Duration),
+    WaitIdle {
+        quiet: Duration,
+        timeout: Duration,
+    },
     Screenshot(Shot),
     Record(PathBuf),
     RecordStop,
@@ -374,7 +377,7 @@ impl Command {
                 arity(2, 3)?;
                 Command::Move {
                     to: value!(point(words[0], words[1]))?,
-                    over: value!(millis(words.get(2).copied()))?,
+                    over: value!(spread(words.get(2).copied()))?,
                 }
             }
             "down" | "up" => {
@@ -404,8 +407,8 @@ impl Command {
                     Some(s) => value!(
                         s.parse::<u32>()
                             .ok()
-                            .filter(|&s| s > 0)
-                            .ok_or_else(|| format!("steps {s:?} is not a positive integer"))
+                            .filter(|s| (1..=1000).contains(s))
+                            .ok_or_else(|| format!("steps {s:?} is not an integer from 1 to 1000"))
                     )?,
                     None => 10,
                 };
@@ -413,7 +416,7 @@ impl Command {
                     from: value!(point(words[0], words[1]))?,
                     to: value!(point(words[2], words[3]))?,
                     steps,
-                    over: value!(millis(words.get(5).copied()))?,
+                    over: value!(spread(words.get(5).copied()))?,
                 }
             }
             "scroll" => {
@@ -471,10 +474,7 @@ impl Command {
             "wait-for" | "wait-gone" => {
                 let (opts, target) = options(TIMEOUT_OPTIONS)?;
                 required(target)?;
-                let mut timeout = Duration::from_millis(5000);
-                for (_, values) in opts {
-                    timeout = value!(millis(Some(values[0])))?;
-                }
+                let timeout = value!(timeout_from(&opts, 5000))?;
                 let target = Target::parse(target);
                 if name == "wait-for" {
                     Command::WaitFor { target, timeout }
@@ -483,11 +483,18 @@ impl Command {
                 }
             }
             "wait-idle" => {
-                arity(0, 1)?;
-                Command::WaitIdle(match words.first() {
-                    Some(&ms) => value!(millis(Some(ms)))?,
-                    None => Duration::from_millis(200),
-                })
+                let (opts, rest) = options(TIMEOUT_OPTIONS)?;
+                let words: Vec<&str> = rest.split_whitespace().collect();
+                if words.len() > 1 {
+                    return Err(format!("{name}: wrong number of arguments; usage: {usage}"));
+                }
+                Command::WaitIdle {
+                    quiet: match words.first() {
+                        Some(&ms) => value!(millis(Some(ms)))?,
+                        None => Duration::from_millis(200),
+                    },
+                    timeout: value!(timeout_from(&opts, 10_000))?,
+                }
             }
             "screenshot" => {
                 let (opts, path) = options(SCREENSHOT_OPTIONS)?;
@@ -563,19 +570,19 @@ impl Command {
     }
 }
 
-/// One side of the window: finite and at least 1, or the layout has nothing
-/// to divide.
+/// One side of the window: finite and from 1 to 16384, or the layout has
+/// nothing to divide or the surface cannot be built.
 pub(crate) fn parse_extent(text: &str) -> Result<f32, String> {
     match text.parse::<f32>() {
-        Ok(v) if v.is_finite() && v >= 1.0 => Ok(v),
-        _ => Err(format!("{text:?} is not a size of at least 1")),
+        Ok(v) if v.is_finite() && (1.0..=16384.0).contains(&v) => Ok(v),
+        _ => Err(format!("{text:?} is not a size from 1 to 16384")),
     }
 }
 
 pub(crate) fn parse_scale(text: &str) -> Result<f32, String> {
     match text.parse::<f32>() {
-        Ok(v) if v.is_finite() && v > 0.0 => Ok(v),
-        _ => Err(format!("scale {text:?} is not a positive number")),
+        Ok(v) if v.is_finite() && (0.25..=8.0).contains(&v) => Ok(v),
+        _ => Err(format!("scale {text:?} is not a number from 0.25 to 8")),
     }
 }
 
@@ -601,15 +608,36 @@ fn positive(text: &str, what: &str) -> Result<usize, String> {
         .ok_or_else(|| format!("{what} {text:?} is not a positive integer"))
 }
 
-/// An optional duration in milliseconds; missing is zero.
-fn millis(text: Option<&str>) -> Result<Duration, String> {
-    match text {
-        None => Ok(Duration::ZERO),
-        Some(ms) => ms
-            .parse::<u64>()
-            .map(Duration::from_millis)
-            .map_err(|_| format!("{ms:?} is not a number of milliseconds")),
+/// An optional duration in milliseconds, at most `max_ms` (`limit` names the
+/// cap in the error); missing is zero.
+fn millis_up_to(text: Option<&str>, max_ms: u64, limit: &str) -> Result<Duration, String> {
+    let Some(ms) = text else {
+        return Ok(Duration::ZERO);
+    };
+    match ms.parse::<u64>() {
+        Ok(n) if n <= max_ms => Ok(Duration::from_millis(n)),
+        Ok(_) => Err(format!("{ms:?} ms is more than {limit}")),
+        Err(_) => Err(format!("{ms:?} is not a number of milliseconds")),
     }
+}
+
+/// A wait or timeout: at most an hour.
+pub(crate) fn millis(text: Option<&str>) -> Result<Duration, String> {
+    millis_up_to(text, 3_600_000, "an hour")
+}
+
+/// The time a pointer move or drag is spread over: at most a minute.
+fn spread(text: Option<&str>) -> Result<Duration, String> {
+    millis_up_to(text, 60_000, "a minute")
+}
+
+/// The value of the last `--timeout` among `opts`, or `default_ms`.
+fn timeout_from(opts: &Options<'_>, default_ms: u64) -> Result<Duration, String> {
+    let mut timeout = Duration::from_millis(default_ms);
+    for (_, values) in opts {
+        timeout = millis(Some(values[0]))?;
+    }
+    Ok(timeout)
 }
 
 fn point(x: &str, y: &str) -> Result<Point, String> {
@@ -767,6 +795,58 @@ mod tests {
             Command::Tree { all: true }
         );
         assert!(Command::parse("tree extra").is_err());
+    }
+
+    #[test]
+    fn wait_idle_takes_quiet_time_and_timeout() {
+        let idle = |quiet, timeout| Command::WaitIdle {
+            quiet: Duration::from_millis(quiet),
+            timeout: Duration::from_millis(timeout),
+        };
+        assert_eq!(Command::parse("wait-idle").unwrap(), idle(200, 10_000));
+        assert_eq!(Command::parse("wait-idle 50").unwrap(), idle(50, 10_000));
+        assert_eq!(
+            Command::parse("wait-idle --timeout 300").unwrap(),
+            idle(200, 300)
+        );
+        assert_eq!(
+            Command::parse("wait-idle --timeout 300 50").unwrap(),
+            idle(50, 300)
+        );
+        assert_eq!(
+            Command::parse("wait-idle 1 2").unwrap_err(),
+            "wait-idle: wrong number of arguments; usage: wait-idle [--timeout MS] [MS]"
+        );
+        assert!(Command::parse("wait-idle --timeout").is_err());
+        assert!(Command::parse("wait-idle --timeout 3600001").is_err());
+    }
+
+    #[test]
+    fn client_numbers_are_bounded() {
+        let wait = |ms: u64| Command::parse(&format!("wait-for --timeout {ms} x"));
+        assert!(wait(3_600_000).is_ok());
+        assert_eq!(
+            Command::parse("wait-for --timeout 3600001 x").unwrap_err(),
+            "wait-for: \"3600001\" ms is more than an hour"
+        );
+        assert!(wait(u64::MAX).is_err());
+        assert!(Command::parse("move 1 1 60000").is_ok());
+        assert_eq!(
+            Command::parse("move 1 1 60001").unwrap_err(),
+            "move: \"60001\" ms is more than a minute"
+        );
+        assert!(Command::parse("drag 1 1 2 2 0").is_err());
+        assert!(Command::parse("drag 1 1 2 2 1001").is_err());
+        assert!(Command::parse("drag 1 1 2 2 1000").is_ok());
+        assert!(Command::parse("drag 1 1 2 2 5 60001").is_err());
+        assert!(Command::parse("resize 16385 10").is_err());
+        assert!(Command::parse("resize 16384 10").is_ok());
+        for bad in ["0.2", "9", "NaN"] {
+            assert!(Command::parse(&format!("scale {bad}")).is_err(), "{bad}");
+        }
+        for good in ["0.25", "8"] {
+            assert!(Command::parse(&format!("scale {good}")).is_ok(), "{good}");
+        }
     }
 
     #[test]

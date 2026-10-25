@@ -44,6 +44,31 @@ expect() {
 }
 
 expect "^ok pid [0-9]+ app demo size 1100x720 scale 1 appearance dark backend " info
+# A second host on the same socket must refuse to start and leave the first alone.
+if [[ ${OS:-} != Windows_NT ]]; then
+    "$target/debug/examples/demo" --headless --control "$sock" --backend "$backend" 2>"$dir/dup.log" &
+    dup=$!
+    for _ in $(seq 50); do
+        kill -0 "$dup" 2>/dev/null || break
+        sleep 0.1
+    done
+    if kill -0 "$dup" 2>/dev/null; then
+        kill "$dup" 2>/dev/null || true
+        wait "$dup" 2>/dev/null || true
+        echo "FAIL  second host on a live socket kept running"
+        failures=$((failures + 1))
+    else
+        dup_status=0
+        wait "$dup" || dup_status=$?
+        if [[ $dup_status == 1 ]] && grep -q 'another host is listening' "$dir/dup.log"; then
+            echo "ok    second host refused"
+        else
+            echo "FAIL  second host: status $dup_status, log: $(cat "$dir/dup.log")"
+            failures=$((failures + 1))
+        fi
+    fi
+    expect "^ok pid" info
+fi
 expect "^ok from start$" clip
 expect "^ok [0-9]+$" tree
 [[ $("$target/debug/iced-impeccable" ctl "$sock" tree) == *'hidden text="Row 60"'* ]] \
@@ -61,6 +86,7 @@ expect "^ok [0-9]+ [0-9]+$" tap Copy
 expect "^ok Ada$" clip
 expect "^ok [0-9]+ [0-9]+$" tap Spinner
 expect "^ok animating$" wait-idle
+expect "^err timeout$" wait-idle --timeout 300
 expect "^ok [0-9]+ [0-9]+$" tap Spinner
 expect "^ok$" key left
 expect '^err unknown key "nokey"; keys: ' key nokey
@@ -72,12 +98,23 @@ expect '^err unknown command "palette" \(see help\)$' palette
 expect "^ok$" appearance light
 expect "^ok .*/light.png 1100x720 scale 1$" screenshot --annotate "$dir/light.png"
 expect "^ok .*/zoom.png 800x320 scale 1$" screenshot --crop 0 0 200 80 --zoom 4 "$dir/zoom.png"
+expect "^ok 1000 700$" resize 1000 700
+expect "^ok 1100 720$" resize 1100 720
+expect "^err too large: physical 16384x16384 exceeds 8192$" resize 16384 16384
+if command -v ffmpeg >/dev/null; then
+    expect "^ok recording " record "$dir/v.mp4"
+    expect "^ok .*v.mp4 [0-9]+ frames" record-stop
+else
+    expect "^err ffmpeg" record "$dir/v.mp4"
+fi
 expect "^ok$" scale 2
 expect "^ok .*/hidpi.png 2200x1440 scale 2$" screenshot "$dir/hidpi.png"
 expect "^ok 1100 720 2$" size
 expect "^ok$" quit
 
 wait "$host" || { echo "FAIL  host exit status $?"; failures=$((failures + 1)); }
+grep -q 'demo: state dropped' "$dir/host.log" \
+    || { echo "FAIL  host dropped the app state at exit"; failures=$((failures + 1)); }
 sheet=$("$target/debug/iced-impeccable" sheet "$dir/sheet.png" "$dir/light.png" "$dir/zoom.png" || true)
 [[ $sheet =~ ^ok\ .*/sheet.png\ [0-9]+x[0-9]+$ ]] && echo "ok    sheet" \
     || { echo "FAIL  sheet: $sheet"; failures=$((failures + 1)); }

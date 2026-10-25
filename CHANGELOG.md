@@ -16,6 +16,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   agents with the detected ones preselected, updates a stale copy and leaves
   a symlinked skill directory alone.
 - The crate package ships the skill files (`plugin/skills/`).
+- `wait-idle [--timeout MS] [MS]`: the time `wait-idle` gives up after is
+  settable (default 10000 ms, the old fixed value).
 
 ### Fixed
 
@@ -30,6 +32,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   read from the frontmatter only.
 - `ctl`, `sheet`, `install` and `help` end with exit status 141 instead of
   panicking when stdout is a closed pipe (`ctl … | head`).
+- A host no longer deletes a file that is not a socket at its `--control`
+  path, and refuses to start (`another host is listening`, exit 1) when a
+  live host owns the socket; only a stale socket file is replaced.
+- A client can no longer exhaust the host with numbers or lines: waits and
+  `--timeout` are at most an hour (`ctl --wait` too), `move` and `drag` times
+  a minute, `drag` steps 1 to 1000, window sizes 1 to 16384, scales 0.25 to 8.
+  A window may not pass 8192 physical pixels on a side (`--size` with
+  `--scale`, `resize` and `scale` reply `err too large: …`), and a zoomed
+  screenshot at most 64 million pixels (`err zoom too large: WxH`).
+- A request line over 64 KiB or that is not UTF-8 gets an `err` reply instead
+  of being cut and parsed, and a reply over 16 MiB becomes an `err` too.
+- `wait-idle` with a quiet time of nine seconds or more no longer always
+  times out: the timeout now counts from the end of the quiet time.
+- `windows` escapes the whole title like `tree` does (backslashes and control
+  characters, not only quotes).
+- The host drops the app's state at exit, so its `Drop` runs (a watchdog ends
+  the process after 5 s if it hangs).
+- `resize` replies with the clamped size in OS-logical units, as `help`
+  says, not the interface size.
+- `record` reads ffmpeg's stderr while it runs (a chatty ffmpeg can no longer
+  block it) and keeps only the first 64 KiB. An app that resizes the window
+  during a recording ends it with `err window resized during recording`
+  and the path of the video up to that point.
 
 ## [0.2.0] - 2026-10-11
 

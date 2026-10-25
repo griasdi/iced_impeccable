@@ -283,9 +283,32 @@ pub(crate) fn node_line(index: usize, node: &Node) -> String {
     line
 }
 
+/// Appends one character made safe for one protocol line.
+fn escape_char(out: &mut String, c: char) {
+    match c {
+        '\\' => out.push_str("\\\\"),
+        '"' => out.push_str("\\\""),
+        c if c.is_control()
+            || ('\u{E000}'..='\u{F8FF}').contains(&c)
+            || ('\u{F0000}'..='\u{10FFFF}').contains(&c) =>
+        {
+            out.push_str(&format!("\\u{{{:04X}}}", u32::from(c)));
+        }
+        c => out.push(c),
+    }
+}
+
 /// Text made safe for one protocol line: `\` and `"` escaped, control and
-/// Private Use Area characters (icon fonts) as `\u{XXXX}`, cut after 80
-/// characters.
+/// Private Use Area characters (icon fonts) as `\u{XXXX}`.
+pub(crate) fn escape_full(text: &str) -> String {
+    let mut out = String::new();
+    for c in text.chars() {
+        escape_char(&mut out, c);
+    }
+    out
+}
+
+/// [`escape_full`], cut after 80 characters.
 pub(crate) fn escape(text: &str) -> String {
     const LIMIT: usize = 80;
     let mut out = String::new();
@@ -294,17 +317,7 @@ pub(crate) fn escape(text: &str) -> String {
             out.push_str("...");
             break;
         }
-        match c {
-            '\\' => out.push_str("\\\\"),
-            '"' => out.push_str("\\\""),
-            c if c.is_control()
-                || ('\u{E000}'..='\u{F8FF}').contains(&c)
-                || ('\u{F0000}'..='\u{10FFFF}').contains(&c) =>
-            {
-                out.push_str(&format!("\\u{{{:04X}}}", u32::from(c)));
-            }
-            c => out.push(c),
-        }
+        escape_char(&mut out, c);
     }
     out
 }
@@ -524,5 +537,11 @@ mod tests {
         );
         let long = "x".repeat(100);
         assert_eq!(escape(&long), format!("{}...", "x".repeat(80)));
+    }
+
+    #[test]
+    fn escape_full_keeps_the_whole_text() {
+        assert_eq!(escape_full(&"x".repeat(100)).len(), 100);
+        assert_eq!(escape_full("a\"b\\c\nd"), "a\\\"b\\\\c\\u{000A}d");
     }
 }

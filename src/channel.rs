@@ -8,12 +8,17 @@ use std::time::Duration;
 
 pub(crate) use imp::{Connection, bind, cleanup, connect};
 
-/// The longest command line a host reads; a longer one is cut there and fails
-/// to parse.
+/// The longest command line a host reads; a longer one is refused.
 const MAX_LINE: u64 = 64 * 1024;
 
-/// The longest reply `ctl` reads.
-const REPLY_MAX: u64 = 1024 * 1024;
+/// The longest reply, with its line end and, on Windows, end marker; `ctl`
+/// reads no more, and a host replaces a longer one with an error.
+const REPLY_MAX: usize = 16 * 1024 * 1024;
+
+/// How much of an over-long line a host reads and discards, and for how long,
+/// before it answers, so the client does not get a reset instead of the error.
+const DRAIN_MAX: usize = 4 * 1024 * 1024;
+const DRAIN_WAIT: Duration = Duration::from_secs(1);
 
 /// Answers one command line; blocks until the host loop has replied.
 pub(crate) type Answer = Arc<dyn Fn(&str) -> String + Send + Sync>;
@@ -21,7 +26,7 @@ pub(crate) type Answer = Arc<dyn Fn(&str) -> String + Send + Sync>;
 /// Reads a reply up to `REPLY_MAX` bytes, stopping at `end` when given.
 fn read_reply(stream: impl Read, end: Option<u8>) -> std::io::Result<String> {
     let mut bytes = Vec::new();
-    let mut stream = stream.take(REPLY_MAX);
+    let mut stream = stream.take(REPLY_MAX as u64);
     let mut chunk = [0u8; 8192];
     loop {
         let n = stream.read(&mut chunk)?;
@@ -46,24 +51,81 @@ fn read_reply(stream: impl Read, end: Option<u8>) -> std::io::Result<String> {
     Ok(text.trim_end_matches(['\r', '\n']).to_owned())
 }
 
+/// Whether a read of at most `MAX_LINE` bytes stopped for lack of room rather
+/// than at a line end or end of input.
+fn too_long(bytes: &[u8]) -> bool {
+    bytes.len() as u64 >= MAX_LINE && bytes.last() != Some(&b'\n')
+}
+
+/// The command line in the bytes a connection sent.
+fn request_line(bytes: Vec<u8>) -> Result<String, &'static str> {
+    if too_long(&bytes) {
+        return Err("err line too long (max 65536 bytes)");
+    }
+    String::from_utf8(bytes).map_err(|_| "err request is not UTF-8")
+}
+
+/// Replaces a reply too large to send with an error.
+fn bounded(reply: String) -> String {
+    if reply.len() + 2 > REPLY_MAX {
+        return format!(
+            "err reply too large: {} bytes (max {REPLY_MAX})",
+            reply.len()
+        );
+    }
+    reply
+}
+
+/// Answers the request bytes of one connection: the host's answer to a valid
+/// line, otherwise the reason the request was refused.
+fn respond(answer: &Answer, bytes: Vec<u8>) -> String {
+    bounded(match request_line(bytes) {
+        Ok(line) => answer(&line),
+        Err(e) => e.to_owned(),
+    })
+}
+
 #[cfg(unix)]
 mod imp {
-    use std::io::{BufRead, BufReader, Read, Write};
+    use std::io::{BufRead, BufReader, ErrorKind, Read, Write};
     use std::net::Shutdown;
+    use std::os::unix::fs::FileTypeExt;
     use std::os::unix::net::{UnixListener, UnixStream};
     use std::path::Path;
     use std::sync::Arc;
+    use std::time::Instant;
 
-    use super::{Answer, Inflight, MAX_LINE, read_reply};
+    use super::{Answer, DRAIN_MAX, DRAIN_WAIT, Inflight, MAX_LINE, read_reply, respond, too_long};
 
     pub(crate) struct Listener(UnixListener);
 
-    /// Binds the control socket, replacing a stale one a killed host left behind.
+    /// Binds the control socket, replacing a stale one a killed host left
+    /// behind. A live socket and a file that is not a socket are left alone.
     pub(crate) fn bind(path: &Path) -> std::io::Result<Listener> {
-        match std::fs::remove_file(path) {
-            Ok(()) => {}
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        match std::fs::symlink_metadata(path) {
+            Err(e) if e.kind() == ErrorKind::NotFound => {}
             Err(e) => return Err(e),
+            Ok(meta) if !meta.file_type().is_socket() => {
+                return Err(std::io::Error::new(
+                    ErrorKind::AlreadyExists,
+                    format!("{} exists and is not a socket", path.display()),
+                ));
+            }
+            Ok(_) => match UnixStream::connect(path) {
+                Ok(_) => {
+                    return Err(std::io::Error::new(
+                        ErrorKind::AddrInUse,
+                        "another host is listening",
+                    ));
+                }
+                Err(e) if e.kind() == ErrorKind::ConnectionRefused => {
+                    match std::fs::remove_file(path) {
+                        Err(e) if e.kind() != ErrorKind::NotFound => return Err(e),
+                        _ => {}
+                    }
+                }
+                Err(e) => return Err(e),
+            },
         }
         UnixListener::bind(path).map(Listener)
     }
@@ -86,17 +148,39 @@ mod imp {
         }
     }
 
+    /// Reads and discards the rest of an over-long line, at most `DRAIN_MAX`
+    /// bytes and `DRAIN_WAIT` long. Errors end it silently.
+    fn drain_line(stream: &UnixStream) {
+        let deadline = Instant::now() + DRAIN_WAIT;
+        let mut chunk = [0u8; 8192];
+        let mut total = 0;
+        while total < DRAIN_MAX {
+            let left = deadline.saturating_duration_since(Instant::now());
+            if left.is_zero() || stream.set_read_timeout(Some(left)).is_err() {
+                return;
+            }
+            match (&*stream).read(&mut chunk) {
+                Ok(0) | Err(_) => return,
+                Ok(n) if chunk[..n].contains(&b'\n') => return,
+                Ok(n) => total += n,
+            }
+        }
+    }
+
     /// Reads one command line, has the loop answer it, writes the reply and
     /// closes the connection, which ends the reply for the client.
     fn serve(stream: UnixStream, answer: &Answer) {
-        let mut line = String::new();
+        let mut bytes = Vec::new();
         if BufReader::new((&stream).take(MAX_LINE))
-            .read_line(&mut line)
+            .read_until(b'\n', &mut bytes)
             .is_err()
         {
             return;
         }
-        let reply = answer(&line);
+        if too_long(&bytes) {
+            drain_line(&stream);
+        }
+        let reply = respond(answer, bytes);
         let mut stream = stream;
         let _ = writeln!(stream, "{reply}");
         let _ = stream.shutdown(Shutdown::Both);
@@ -134,7 +218,7 @@ mod imp {
     use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
     use tokio::net::windows::named_pipe::{NamedPipeServer, ServerOptions};
 
-    use super::{Answer, Inflight, MAX_LINE, read_reply};
+    use super::{Answer, DRAIN_MAX, DRAIN_WAIT, Inflight, MAX_LINE, read_reply, respond, too_long};
 
     const PREFIX: &str = r"\\.\pipe\";
     /// `ERROR_PIPE_BUSY`: every instance of the pipe is taken for the moment.
@@ -232,21 +316,41 @@ mod imp {
         }
     }
 
+    /// Reads and discards the rest of an over-long line, at most `DRAIN_MAX`
+    /// bytes and `DRAIN_WAIT` long. Errors end it silently.
+    async fn drain_line(reader: &mut BufReader<NamedPipeServer>) {
+        let _ = tokio::time::timeout(DRAIN_WAIT, async {
+            let mut chunk = [0u8; 8192];
+            let mut total = 0;
+            while total < DRAIN_MAX {
+                match reader.read(&mut chunk).await {
+                    Ok(0) | Err(_) => return,
+                    Ok(n) if chunk[..n].contains(&b'\n') => return,
+                    Ok(n) => total += n,
+                }
+            }
+        })
+        .await;
+    }
+
     /// Reads one command line, has the loop answer it, writes the reply with
     /// its end marker, waits for the client to hang up, then disconnects,
     /// so closing the pipe cannot discard a reply that has not been read yet.
     async fn serve(pipe: NamedPipeServer, answer: Answer) {
         let mut reader = BufReader::new(pipe);
-        let mut line = String::new();
+        let mut bytes = Vec::new();
         if (&mut reader)
             .take(MAX_LINE)
-            .read_line(&mut line)
+            .read_until(b'\n', &mut bytes)
             .await
             .is_err()
         {
             return;
         }
-        let Ok(reply) = tokio::task::spawn_blocking(move || answer(&line)).await else {
+        if too_long(&bytes) {
+            drain_line(&mut reader).await;
+        }
+        let Ok(reply) = tokio::task::spawn_blocking(move || respond(&answer, bytes)).await else {
             return;
         };
         let pipe = reader.get_mut();
@@ -322,5 +426,120 @@ impl Drop for InflightGuard {
     fn drop(&mut self) {
         *self.0.count.lock().expect("inflight count") -= 1;
         self.0.idle.notify_all();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    use super::*;
+
+    #[test]
+    fn request_line_limits_length_and_encoding() {
+        let at_limit = vec![b'a'; MAX_LINE as usize];
+        assert_eq!(
+            request_line(at_limit),
+            Err("err line too long (max 65536 bytes)")
+        );
+        let mut fits = vec![b'a'; MAX_LINE as usize - 1];
+        fits.push(b'\n');
+        assert_eq!(request_line(fits).map(|l| l.len()), Ok(MAX_LINE as usize));
+        assert_eq!(
+            request_line(vec![0xff, b'\n']),
+            Err("err request is not UTF-8")
+        );
+        assert_eq!(request_line(b"info".to_vec()), Ok("info".to_owned()));
+    }
+
+    #[test]
+    fn respond_skips_the_answer_for_refused_requests() {
+        let called = Arc::new(AtomicBool::new(false));
+        let flag = called.clone();
+        let answer: Answer = Arc::new(move |line| {
+            flag.store(true, Ordering::SeqCst);
+            format!("ok {}", line.trim())
+        });
+        assert_eq!(
+            respond(&answer, vec![b'a'; MAX_LINE as usize]),
+            "err line too long (max 65536 bytes)"
+        );
+        assert_eq!(
+            respond(&answer, vec![0xff, b'\n']),
+            "err request is not UTF-8"
+        );
+        assert!(!called.load(Ordering::SeqCst));
+        assert_eq!(respond(&answer, b"info\n".to_vec()), "ok info");
+        assert!(called.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn bounded_replaces_replies_that_cannot_be_sent() {
+        assert_eq!(bounded("ok".to_owned()), "ok");
+        let reply = bounded("a".repeat(REPLY_MAX));
+        assert_eq!(
+            reply,
+            format!("err reply too large: {REPLY_MAX} bytes (max {REPLY_MAX})")
+        );
+        let fits = "a".repeat(REPLY_MAX - 2);
+        assert_eq!(bounded(fits.clone()), fits);
+    }
+
+    #[cfg(unix)]
+    mod bind {
+        use std::io::ErrorKind;
+        use std::os::unix::net::UnixListener;
+        use std::path::PathBuf;
+
+        use super::super::bind;
+
+        fn temp_dir(name: &str) -> PathBuf {
+            let dir = std::env::temp_dir().join(format!(
+                "iced-impeccable-channel-{}-{name}",
+                std::process::id()
+            ));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).unwrap();
+            dir
+        }
+
+        #[test]
+        fn refuses_a_file_that_is_not_a_socket() {
+            let dir = temp_dir("file");
+            let path = dir.join("control.sock");
+            std::fs::write(&path, "keep").unwrap();
+            let err = bind(&path).err().expect("bind must fail");
+            assert_eq!(err.kind(), ErrorKind::AlreadyExists);
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), "keep");
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+
+        #[test]
+        fn refuses_a_socket_with_a_live_listener() {
+            let dir = temp_dir("live");
+            let path = dir.join("control.sock");
+            let _live = UnixListener::bind(&path).unwrap();
+            let err = bind(&path).err().expect("bind must fail");
+            assert_eq!(err.kind(), ErrorKind::AddrInUse);
+            assert!(path.exists());
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+
+        #[test]
+        fn replaces_a_stale_socket() {
+            let dir = temp_dir("stale");
+            let path = dir.join("control.sock");
+            drop(UnixListener::bind(&path).unwrap());
+            assert!(path.exists());
+            assert!(bind(&path).is_ok());
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+
+        #[test]
+        fn binds_a_new_path() {
+            let dir = temp_dir("new");
+            assert!(bind(&dir.join("control.sock")).is_ok());
+            let _ = std::fs::remove_dir_all(&dir);
+        }
     }
 }

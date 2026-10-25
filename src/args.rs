@@ -6,6 +6,7 @@ use std::path::PathBuf;
 
 use iced::Size;
 
+use crate::host::MAX_PHYSICAL;
 use crate::protocol::{parse_appearance, parse_extent, parse_scale};
 
 /// Flags that take a value.
@@ -71,6 +72,17 @@ impl HostArgs {
                         other => return Err(format!("backend {other:?} is not wgpu or tiny-skia")),
                     }
                 }
+            }
+        }
+        if let Some(size) = size {
+            let longest = (size.width * scale)
+                .round()
+                .max((size.height * scale).round());
+            if longest > MAX_PHYSICAL as f32 {
+                return Err(format!(
+                    "size {}x{} at scale {scale} exceeds {MAX_PHYSICAL} px on a side",
+                    size.width, size.height
+                ));
             }
         }
         Ok(Self {
@@ -152,6 +164,18 @@ mod tests {
         assert!(HostArgs::parse(&os(&["--control", "a", "--backend", "gl"])).is_err());
         assert!(HostArgs::parse(&os(&["--control", "a", "--clipboard"])).is_err());
         assert!(HostArgs::parse(&os(&["--control"])).is_err());
+    }
+
+    #[test]
+    fn rejects_sizes_and_scales_out_of_bounds() {
+        let parse = |size: &str, scale: &str| {
+            HostArgs::parse(&os(&["--control", "a", "--size", size, "--scale", scale]))
+        };
+        assert!(parse("16385x10", "1").is_err());
+        assert!(parse("10x10", "9").is_err());
+        assert!(parse("5000x5000", "2").is_err());
+        assert!(parse("4096x4096", "2").is_ok());
+        assert!(parse("16384x10", "0.25").is_ok());
     }
 
     #[test]

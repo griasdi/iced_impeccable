@@ -70,6 +70,12 @@ struct Demo {
     phase: f32,
 }
 
+impl Drop for Demo {
+    fn drop(&mut self) {
+        eprintln!("demo: state dropped");
+    }
+}
+
 impl Demo {
     fn new() -> Self {
         Self {

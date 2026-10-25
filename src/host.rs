@@ -45,8 +45,6 @@ const FRAME: Duration = Duration::from_millis(16);
 const SETTLE: Duration = Duration::from_millis(10);
 /// The most an input command waits for that quiet.
 const SETTLE_MAX: Duration = Duration::from_millis(250);
-/// When `wait-idle` gives up.
-const IDLE_TIMEOUT: Duration = Duration::from_secs(10);
 /// How long only redraws may keep `wait-idle` busy before it answers
 /// `ok animating`.
 const ANIMATING_AFTER: Duration = Duration::from_secs(1);
@@ -60,6 +58,13 @@ const TARGET_POLL: Duration = Duration::from_millis(50);
 const QUIT_GRACE: Duration = Duration::from_secs(5);
 /// How long the exit waits for connections to write their last reply.
 const DRAIN_TIMEOUT: Duration = Duration::from_secs(2);
+/// How long dropping the app's state may take at exit before the process
+/// ends anyway.
+const EXIT_WATCHDOG: Duration = Duration::from_secs(5);
+/// The longest side, in physical pixels, of a window and so of a screenshot.
+pub(crate) const MAX_PHYSICAL: u32 = 8192;
+/// The most pixels a zoomed screenshot may have.
+const MAX_ZOOMED_PIXELS: u64 = 64_000_000;
 /// Frame rate of `record`.
 const RECORD_FPS: u32 = 30;
 
@@ -163,8 +168,28 @@ where
     host.close();
     inflight.drain(DRAIN_TIMEOUT);
     channel::cleanup(&args.control);
-    // Exit rather than return: dropping an executor may block until its
-    // blocking tasks finish, and nothing is left to wait for.
+    // Drop the app's state, so its `Drop` runs (a database flush, a lock file),
+    // but not the executor: dropping that may block until its blocking tasks
+    // finish. A watchdog ends the process if a `Drop` hangs.
+    let Host {
+        program,
+        state,
+        hooks,
+        runtime,
+        renderer,
+        windows,
+        ..
+    } = host;
+    std::mem::forget(runtime);
+    std::thread::spawn(move || {
+        std::thread::sleep(EXIT_WATCHDOG);
+        std::process::exit(code)
+    });
+    drop(windows);
+    drop(state);
+    drop(hooks);
+    drop(program);
+    drop(renderer);
     std::process::exit(code)
 }
 
@@ -250,6 +275,32 @@ impl WindowState {
     }
 }
 
+/// The frame size of a window of OS-logical `size` at `os_scale`.
+fn physical(size: Size, os_scale: f32) -> Size<u32> {
+    Size::new(
+        (size.width * os_scale).round().max(1.0) as u32,
+        (size.height * os_scale).round().max(1.0) as u32,
+    )
+}
+
+/// The error for a window whose frame would pass `MAX_PHYSICAL` on a side.
+fn too_large(size: Size, os_scale: f32) -> Option<String> {
+    let p = physical(size, os_scale);
+    (p.width > MAX_PHYSICAL || p.height > MAX_PHYSICAL).then(|| {
+        format!(
+            "err too large: physical {}x{} exceeds {MAX_PHYSICAL}",
+            p.width, p.height
+        )
+    })
+}
+
+/// The error for a screenshot whose zoomed frame would pass `MAX_ZOOMED_PIXELS`.
+fn zoom_too_large(size: Size<u32>, zoom: u32) -> Option<String> {
+    let w = u64::from(size.width) * u64::from(zoom);
+    let h = u64::from(size.height) * u64::from(zoom);
+    (zoom > 1 && w * h > MAX_ZOOMED_PIXELS).then(|| format!("err zoom too large: {w}x{h}"))
+}
+
 /// `size` limited to the window's `min_size` and `max_size`.
 fn clamp(settings: &window::Settings, size: Size) -> Size {
     let mut size = size;
@@ -264,6 +315,8 @@ fn clamp(settings: &window::Settings, size: Size) -> Size {
 
 struct IdleWaiter {
     quiet: Duration,
+    /// How long past the quiet time the waiter lasts.
+    timeout: Duration,
     since: Instant,
     reply: mpsc::Sender<String>,
 }
@@ -283,12 +336,33 @@ struct TargetWaiter {
 struct Recording {
     window: window::Id,
     path: PathBuf,
+    /// The frame size ffmpeg was told.
+    size: Size<u32>,
     started: Instant,
     /// Frames sent so far; frame `n` shows the time `started + n / fps`.
     written: u64,
+    /// The window changed size, so no more frames are captured.
+    resized: bool,
     frames: mpsc::SyncSender<Arc<Vec<u8>>>,
     writer: std::thread::JoinHandle<Result<(), String>>,
+    /// What ffmpeg wrote to stderr, read while it runs so a full pipe cannot
+    /// block it.
+    stderr: std::thread::JoinHandle<String>,
     child: Child,
+}
+
+/// The most of ffmpeg's stderr kept for an error reply.
+const STDERR_KEEP: u64 = 64 * 1024;
+
+/// Reads `pipe` to its end on a thread; the first `STDERR_KEEP` bytes are the
+/// result, the rest is discarded.
+fn drain_stderr(mut pipe: impl Read + Send + 'static) -> std::thread::JoinHandle<String> {
+    std::thread::spawn(move || {
+        let mut kept = Vec::new();
+        let _ = pipe.by_ref().take(STDERR_KEEP).read_to_end(&mut kept);
+        let _ = std::io::copy(&mut pipe, &mut std::io::sink());
+        String::from_utf8_lossy(&kept).into_owned()
+    })
 }
 
 impl Recording {
@@ -302,8 +376,10 @@ impl Recording {
         let Recording {
             path,
             written,
+            resized,
             frames,
             writer,
+            stderr,
             mut child,
             ..
         } = self;
@@ -312,13 +388,9 @@ impl Recording {
         let wrote = writer
             .join()
             .unwrap_or_else(|_| Err("writer panicked".to_owned()));
-        // Read before waiting: a child blocked on a full stderr pipe never
-        // exits.
-        let mut stderr = String::new();
-        if let Some(mut pipe) = child.stderr.take() {
-            let _ = pipe.read_to_string(&mut stderr);
-        }
-        let failure = match (wrote, child.wait()) {
+        let status = child.wait();
+        let stderr = stderr.join().unwrap_or_default();
+        let failure = match (wrote, status) {
             (Err(e), _) => Some(e),
             (Ok(()), Err(e)) => Some(e.to_string()),
             (Ok(()), Ok(status)) if !status.success() => Some(status.to_string()),
@@ -326,6 +398,10 @@ impl Recording {
         };
         match failure {
             Some(e) => format!("err ffmpeg: {e}: {}", stderr.trim()),
+            None if resized => format!(
+                "err window resized during recording: {} has the {written} frames before it",
+                path.display()
+            ),
             None => format!(
                 "ok {} {written} frames {:.1}s",
                 path.display(),
@@ -442,10 +518,7 @@ where
             .map_or((Size::new(1.0, 1.0), self.os_scale), |w| {
                 (w.size, w.os_scale)
             });
-        Size::new(
-            (size.width * os).round().max(1.0) as u32,
-            (size.height * os).round().max(1.0) as u32,
-        )
+        physical(size, os)
     }
 
     /// The logical size the interface is laid out in.
@@ -708,7 +781,7 @@ where
             .min();
         let idle = self.idle_waiters.iter().flat_map(|w| {
             let quiet_at = self.last_activity.max(w.since) + w.quiet;
-            let give_up = w.since + IDLE_TIMEOUT;
+            let give_up = w.since + w.quiet + w.timeout;
             [
                 (quiet_at > now).then_some(quiet_at),
                 (self.last_update + UPDATE_GAP > now).then_some(self.last_update + UPDATE_GAP),
@@ -721,7 +794,11 @@ where
         let check =
             (!self.target_waiters.is_empty()).then_some(self.last_target_check + TARGET_POLL);
         let deadlines = self.target_waiters.iter().map(|w| w.deadline);
-        let capture = self.recording.as_ref().map(Recording::next_frame);
+        let capture = self
+            .recording
+            .as_ref()
+            .filter(|r| !r.resized)
+            .map(Recording::next_frame);
         frame
             .into_iter()
             .chain(capture)
@@ -735,7 +812,8 @@ where
 
     /// `ok idle` once nothing but heartbeats happened for the quiet time and
     /// no frame is pending; `ok animating` when only redraws kept it busy for
-    /// another second; `err timeout` after ten seconds of real activity.
+    /// another second; `err timeout` once the timeout has passed on top of
+    /// the quiet time, with real activity in between.
     fn answer_idle_waiters(&mut self) {
         if self.idle_waiters.is_empty() {
             return;
@@ -749,7 +827,7 @@ where
                 "ok idle"
             } else if now >= quiet_at + ANIMATING_AFTER {
                 "ok animating"
-            } else if now >= waiter.since + IDLE_TIMEOUT {
+            } else if now >= waiter.since + waiter.quiet + waiter.timeout {
                 "err timeout"
             } else {
                 return true;
@@ -801,9 +879,10 @@ where
             Command::Help => self.help(),
             Command::Windows => self.windows(),
             Command::Info => self.info(window),
-            Command::WaitIdle(quiet) => {
+            Command::WaitIdle { quiet, timeout } => {
                 self.idle_waiters.push(IdleWaiter {
                     quiet,
+                    timeout,
                     since: Instant::now(),
                     reply,
                 });
@@ -857,7 +936,7 @@ where
                 size.width,
                 size.height,
                 self.total_scale(window.id),
-                title.replace('"', "\\\"")
+                target::escape_full(&title)
             ));
         }
         out
@@ -1041,25 +1120,38 @@ where
                 "err stop the recording first".to_owned()
             }
             Command::Resize(size) => {
-                if let Some(window) = self.win_mut(id) {
-                    window.size = clamp(&window.settings, size);
+                let Some(window) = self.win(id) else {
+                    let _ = reply.send("err window closed".to_owned());
+                    return;
+                };
+                let size = clamp(&window.settings, size);
+                if let Some(e) = too_large(size, window.os_scale) {
+                    e
+                } else {
+                    if let Some(window) = self.win_mut(id) {
+                        window.size = size;
+                    }
+                    let ui = self.ui_size(id);
+                    let _ = self.input(id, [Event::Window(window::Event::Resized(ui))]);
+                    format!("ok {} {}", size.width, size.height)
                 }
-                let size = self.ui_size(id);
-                let _ = self.input(id, [Event::Window(window::Event::Resized(size))]);
-                format!("ok {} {}", size.width, size.height)
             }
             Command::Scale(scale) => {
-                if let Some(window) = self.win_mut(id) {
-                    window.os_scale = scale;
+                if let Some(e) = self.win(id).and_then(|w| too_large(w.size, scale)) {
+                    e
+                } else {
+                    if let Some(window) = self.win_mut(id) {
+                        window.os_scale = scale;
+                    }
+                    let size = self.ui_size(id);
+                    self.input(
+                        id,
+                        [
+                            Event::Window(window::Event::Rescaled(scale)),
+                            Event::Window(window::Event::Resized(size)),
+                        ],
+                    )
                 }
-                let size = self.ui_size(id);
-                self.input(
-                    id,
-                    [
-                        Event::Window(window::Event::Rescaled(scale)),
-                        Event::Window(window::Event::Resized(size)),
-                    ],
-                )
             }
             Command::Drop(path) => self.input(
                 id,
@@ -1071,7 +1163,7 @@ where
             Command::Help
             | Command::Info
             | Command::Windows
-            | Command::WaitIdle(_)
+            | Command::WaitIdle { .. }
             | Command::RecordStop
             | Command::Appearance(_)
             | Command::Clip
@@ -1297,6 +1389,9 @@ where
                 Err(e) => return format!("err {e}"),
             };
         }
+        if let Some(e) = zoom_too_large(frame.size, shot.zoom) {
+            return e;
+        }
         let frame = image::zoom(&frame, shot.zoom);
         if let Err(e) = image::write_png(&shot.path, &frame) {
             return format!("err {}: {e}", shot.path.display());
@@ -1384,11 +1479,12 @@ where
             Ok(child) => child,
             Err(e) => return format!("err ffmpeg: {e}"),
         };
-        let Some(mut stdin) = child.stdin.take() else {
+        let (Some(mut stdin), Some(pipe)) = (child.stdin.take(), child.stderr.take()) else {
             let _ = child.kill();
             let _ = child.wait();
-            return "err ffmpeg: no stdin".to_owned();
+            return "err ffmpeg: no stdin or stderr".to_owned();
         };
+        let stderr = drain_stderr(pipe);
         let (frames, received) = mpsc::sync_channel::<Arc<Vec<u8>>>(60);
         let writer = std::thread::spawn(move || {
             for frame in received {
@@ -1405,10 +1501,13 @@ where
         self.recording = Some(Recording {
             window: id,
             path,
+            size,
             started: Instant::now(),
             written: 0,
+            resized: false,
             frames,
             writer,
+            stderr,
             child,
         });
         self.capture();
@@ -1420,9 +1519,20 @@ where
     fn capture(&mut self) {
         let now = Instant::now();
         let id = match &self.recording {
-            Some(recording) if now >= recording.next_frame() => recording.window,
+            Some(recording) if !recording.resized && now >= recording.next_frame() => {
+                recording.window
+            }
             _ => return,
         };
+        // A video has one frame size: once the app resizes the window the
+        // recording keeps the frames it has.
+        let size = self.physical_size(id);
+        if let Some(recording) = &mut self.recording
+            && recording.size != size
+        {
+            recording.resized = true;
+            return;
+        }
         let scale = self.total_scale(id);
         let Some(mut frame) = self.render(id) else {
             return;
@@ -1726,5 +1836,38 @@ fn answer<M>(line: &str, inputs: &mpsc::Sender<Input<M>>) -> String {
                 reply_rx.recv().unwrap_or_else(|_| "err exiting".to_owned())
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn too_large_checks_the_physical_size() {
+        assert_eq!(too_large(Size::new(8192.0, 1.0), 1.0), None);
+        assert_eq!(
+            too_large(Size::new(8193.0, 1.0), 1.0).as_deref(),
+            Some("err too large: physical 8193x1 exceeds 8192")
+        );
+        assert_eq!(too_large(Size::new(4096.0, 4096.0), 2.0), None);
+        assert!(too_large(Size::new(4097.0, 10.0), 2.0).is_some());
+    }
+
+    #[test]
+    fn zoom_too_large_checks_the_zoomed_pixels() {
+        assert_eq!(zoom_too_large(Size::new(1100, 720), 8), None);
+        assert_eq!(
+            zoom_too_large(Size::new(2200, 1440), 8).as_deref(),
+            Some("err zoom too large: 17600x11520")
+        );
+        assert_eq!(zoom_too_large(Size::new(8192, 8192), 1), None);
+    }
+
+    #[test]
+    fn stderr_keeps_the_first_64_kib_and_ends() {
+        let pipe = std::io::Cursor::new(vec![b'e'; 100 * 1024]);
+        let kept = drain_stderr(pipe).join().unwrap();
+        assert_eq!(kept.len(), 65536);
     }
 }
