@@ -1,0 +1,88 @@
+name: Release
+
+# A pushed vX.Y.Z tag: check it against Cargo.toml and CHANGELOG.md, run CI,
+# publish the crate to crates.io (Trusted Publishing), then create the GitHub
+# release with the version's CHANGELOG section as notes. RELEASING.md has the
+# whole checklist.
+on:
+  push:
+    tags: ["v[0-9]+.[0-9]+.[0-9]+"]
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  check:
+    name: Tag, version and CHANGELOG agree
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Tag matches Cargo.toml
+        id: version
+        run: |
+          version=${GITHUB_REF_NAME#v}
+          crate=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[0].version')
+          if [[ $version != "$crate" ]]; then
+            echo "::error::tag $GITHUB_REF_NAME does not match Cargo.toml version $crate"
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: CHANGELOG has the version's section
+        run: scripts/release-notes.sh "${{ steps.version.outputs.version }}"
+
+  ci:
+    name: CI
+    needs: check
+    uses: ./.github/workflows/ci.yml
+
+  publish:
+    name: Publish to crates.io
+    needs: [check, ci]
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    environment: release
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: false
+
+      - uses: rust-lang/crates-io-auth-action@v1
+        id: auth
+
+      - name: cargo publish
+        run: cargo publish --locked
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
+
+  github-release:
+    name: GitHub release
+    needs: [check, publish]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Create the release with the CHANGELOG section
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.check.outputs.version }}
+        run: |
+          scripts/release-notes.sh "$VERSION" > "$RUNNER_TEMP/notes.md"
+          gh release create "$GITHUB_REF_NAME" --verify-tag --title "$VERSION" --notes-file "$RUNNER_TEMP/notes.md"

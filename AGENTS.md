@@ -30,7 +30,9 @@ Two things live here:
 | `examples/multiwin.rs` | daemon with two windows, for window selection |
 | `plugin/skills/iced-impeccable/` | `SKILL.md` and `reference/*.md` |
 | `scripts/smoke.sh` | end-to-end smoke: demo headless, every protocol path checked |
+| `scripts/release-notes.sh` | CHANGELOG section of a version (release notes, checked) |
 | `.github/workflows/ci.yml` | CI: Linux and Windows (clippy, test, smoke on tiny-skia), cargo-deny |
+| `.github/workflows/release.yml` | release: on a `vX.Y.Z` tag, checks, CI, crates.io (Trusted Publishing), GitHub release |
 
 ## Gate
 
@@ -70,7 +72,9 @@ reply line of every command; extend it when a command or reply changes.
 ## Changes and releases
 
 User-visible changes go into `CHANGELOG.md` under `[Unreleased]`. The release
-checklist is `RELEASING.md`. `origin` is github.com/griasdi/iced_impeccable.
+checklist is `RELEASING.md`. A pushed `vX.Y.Z` tag publishes (`release.yml`).
+`CONTRIBUTING.md` is the guide for outside contributors. `origin` is
+github.com/griasdi/iced_impeccable.
 
 ## Commits
 

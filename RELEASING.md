@@ -29,6 +29,11 @@ cargo semver-checks --baseline-rev "$(git tag --list 'v*' --sort=-v:refname | he
   `## [Unreleased]` above it.
 - Add `[X.Y.Z]: https://github.com/griasdi/iced_impeccable/releases/tag/vX.Y.Z`
   at the bottom.
+- Point the `[Unreleased]:` link at
+  `https://github.com/griasdi/iced_impeccable/compare/vX.Y.Z...HEAD`.
+
+`scripts/release-notes.sh X.Y.Z` prints the release notes and fails as the
+release workflow would.
 
 ## 4. Run every gate
 
@@ -36,6 +41,7 @@ cargo semver-checks --baseline-rev "$(git tag --list 'v*' --sort=-v:refname | he
 cargo fmt --check
 cargo clippy --all-targets -- -D warnings
 cargo test
+scripts/release-notes.sh X.Y.Z
 cargo build --example demo --bin iced-impeccable
 scripts/smoke.sh
 cargo check --target x86_64-pc-windows-gnu --all-targets
@@ -52,13 +58,22 @@ git tag -a vX.Y.Z -m "Release X.Y.Z"
 git push origin main vX.Y.Z
 ```
 
-## 6. Publish
+Pushing the tag starts `.github/workflows/release.yml`.
 
-Once the tag is pushed and CI is green:
+## 6. Watch the release
+
+The release workflow checks the tag against `Cargo.toml` and the CHANGELOG
+section, runs the whole CI, publishes to crates.io with Trusted Publishing and
+creates the GitHub release titled `X.Y.Z` with the CHANGELOG section as notes.
 
 ```sh
-cargo publish --locked
+gh run watch "$(gh run list --workflow release.yml --limit 1 --json databaseId -q '.[0].databaseId')"
 ```
+
+- Failure before `publish`: fix on `main`, then move the tag:
+  `git tag -d vX.Y.Z && git push origin :refs/tags/vX.Y.Z`, tag and push again.
+- Failure in `github-release` only: `gh run rerun <run-id> --failed`. Never
+  re-run `publish`: crates.io rejects a second upload of the same version.
 
 ## 7. Install locally
 
@@ -67,3 +82,11 @@ cargo install --path . --bin iced-impeccable --locked
 omp plugin marketplace update iced-impeccable    # re-copies the skill files
 omp plugin install --force iced-impeccable@iced-impeccable
 ```
+
+## Trusted Publishing
+
+Already configured on crates.io, nothing to do: `iced_impeccable` → Settings →
+Trusted Publishing has a GitHub publisher for repository
+`griasdi/iced_impeccable`, workflow `release.yml`, environment `release`.
+Renaming the workflow file or the environment breaks publishing until this
+entry is changed too.
