@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- The skill is checked against impeccable 4.9.1: `foundations` runs without
+  the detector (web items not applicable, contrast, tokens and motion judged
+  by hand), `audit` saves its report via `audit-storage` like impeccable's
+  native audit, and DESIGN.md typography omits `letterSpacing` instead of
+  writing `"normal"`.
+
 ## [0.3.0] - 2026-10-25
 
 ### Added
