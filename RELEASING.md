@@ -18,10 +18,11 @@ cargo semver-checks --baseline-rev "$(git tag --list 'v*' --sort=-v:refname | he
 
 - `Cargo.toml`: `version = "X.Y.Z"`, then `cargo update -p iced_impeccable`.
 - `plugin/.claude-plugin/plugin.json`: `"version"`.
+- `plugin/package.json`: `"version"`.
 - `.claude-plugin/marketplace.json`: the plugin entry's `"version"`.
 - `plugin/skills/iced-impeccable/SKILL.md`: frontmatter `version`.
 
-`cargo test --test version` checks that the four agree.
+`cargo test --test version` checks that the five agree.
 
 ## 3. Update the CHANGELOG
 
@@ -47,7 +48,7 @@ scripts/smoke.sh
 cargo check --target x86_64-pc-windows-gnu --all-targets
 cargo deny --log-level error check
 cargo package --locked
-cargo package --list    # no .claude-plugin, .github, scripts or assets entries
+cargo package --list    # no .claude-plugin, .github, scripts, assets or plugin/package.json entries
 ```
 
 ## 5. Commit, tag, push

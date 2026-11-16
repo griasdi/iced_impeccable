@@ -17,6 +17,7 @@ categories = ["gui", "development-tools::testing"]
 # git.
 exclude = [
     "/plugin/.claude-plugin",
+    "/plugin/package.json",
     "/.claude-plugin",
     "/.github",
     "/.githooks",

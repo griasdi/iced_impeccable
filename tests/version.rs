@@ -27,6 +27,15 @@ fn skill_and_manifests_match_the_crate_version() {
         assert_eq!(json["version"].as_str(), Some(cargo), "plugin.json version");
     }
 
+    if let Some(json) = read("plugin/package.json") {
+        let json: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(
+            json["version"].as_str(),
+            Some(cargo),
+            "package.json version"
+        );
+    }
+
     if let Some(json) = read(".claude-plugin/marketplace.json") {
         let json: serde_json::Value = serde_json::from_str(&json).unwrap();
         let plugin = json["plugins"]
