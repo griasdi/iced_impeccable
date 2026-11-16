@@ -17,6 +17,9 @@ ignore = [
     "RUSTSEC-2026-0370",
     "RUSTSEC-2026-0371",
     "RUSTSEC-2026-0372",
+    # pin-utils is unmaintained (no vulnerability, no safe upgrade), pulled
+    # in through iced_futures -> wasmtimer. Revisit when upstream drops it.
+    "RUSTSEC-2026-0441",
 ]
 
 [licenses]
