@@ -217,9 +217,9 @@ iced-impeccable install [--agent claude,omp] [--yes] [DIR]
 
 - Finds the git repository containing `DIR` (default `.`).
 - Checks whether the marketplace plugin `iced-impeccable@iced-impeccable` is
-  installed for Claude Code or omp; it would load next to the repo copy, so
-  `install` offers to remove it (`--yes` removes without asking) and aborts
-  otherwise.
+  installed for Claude Code or omp, or the omp package linked with
+  `omp plugin link`; it would load next to the repo copy, so `install` offers
+  to remove it (`--yes` removes without asking) and aborts otherwise.
 - Asks for the agents, with the detected ones preselected; `--agent` skips
   the question and is required without a terminal.
 - Writes `.claude/skills/iced-impeccable/` and `.omp/skills/iced-impeccable/`.
@@ -243,6 +243,15 @@ Claude Code:
 omp plugin marketplace add /path/to/iced_impeccable
 omp plugin install iced-impeccable@iced-impeccable
 ```
+
+Or without a marketplace, from a clone:
+
+```sh
+omp plugin link /path/to/iced_impeccable/plugin
+```
+
+The link follows the clone's working tree and, like the marketplace, excludes
+the per-repo install.
 
 ## Demo
 

@@ -1,6 +1,6 @@
 //! `iced-impeccable install`: the skill, embedded in the binary, copied into
-//! a git repository for Claude Code and omp, and the marketplace plugin
-//! detected and removed through the agents' own CLIs.
+//! a git repository for Claude Code and omp, and a marketplace or linked
+//! install of the plugin detected and removed through the agents' own CLIs.
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -11,6 +11,8 @@ use std::process::{Command, Stdio};
 use serde_json::Value;
 
 pub(crate) const PLUGIN_ID: &str = "iced-impeccable@iced-impeccable";
+/// The `name` of `plugin/package.json`, as omp lists a linked plugin.
+pub(crate) const PACKAGE_NAME: &str = "iced-impeccable";
 pub(crate) const SKILL_NAME: &str = "iced-impeccable";
 
 macro_rules! skill_file {
@@ -190,29 +192,47 @@ fn collect_files(dir: &Path, prefix: &str, out: &mut BTreeMap<String, PathBuf>) 
     Ok(())
 }
 
-/// A marketplace install of the plugin.
-pub(crate) struct Install {
-    pub agent: &'static Agent,
-    pub scope: String,
+/// How the plugin is installed.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum Via {
+    /// A marketplace install in this scope (`user`, `project`, `local`).
+    Marketplace(String),
+    /// omp only: the package from `omp plugin link` (user-wide).
+    Package,
 }
 
-/// The scopes of `plugin list --json` output that load the plugin in
-/// `root` (canonical), deduplicated, in listing order.
-pub(crate) fn parse_installs(
-    agent: &Agent,
-    json: &str,
-    root: &Path,
-) -> Result<Vec<String>, String> {
+impl std::fmt::Display for Via {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Via::Marketplace(scope) => f.write_str(scope),
+            Via::Package => f.write_str("linked package"),
+        }
+    }
+}
+
+/// An install of the plugin that loads next to a repo copy.
+pub(crate) struct Install {
+    pub agent: &'static Agent,
+    pub via: Via,
+}
+
+/// The installs in `plugin list --json` output that load the plugin in
+/// `root` (canonical), deduplicated: marketplace scopes in listing order,
+/// then a linked package.
+pub(crate) fn parse_installs(agent: &Agent, json: &str, root: &Path) -> Result<Vec<Via>, String> {
     let unexpected = || format!("unexpected {} plugin list output", agent.cli);
     let value: Value = serde_json::from_str(json).map_err(|_| unexpected())?;
     let in_root = |path: Option<&Value>| {
         path.and_then(Value::as_str)
             .is_some_and(|p| fs::canonicalize(p).is_ok_and(|p| p == root))
     };
-    let mut scopes: Vec<String> = Vec::new();
+    let mut found: Vec<Via> = Vec::new();
     let mut add = |scope: &str| {
-        if !scopes.iter().any(|s| s == scope) {
-            scopes.push(scope.to_owned());
+        if !found
+            .iter()
+            .any(|v| matches!(v, Via::Marketplace(s) if s == scope))
+        {
+            found.push(Via::Marketplace(scope.to_owned()));
         }
     };
     let ours = |item: &Value| item.get("id").and_then(Value::as_str) == Some(PLUGIN_ID);
@@ -256,15 +276,26 @@ pub(crate) fn parse_installs(
                     }
                 }
             }
+            // A link loads in every project.
+            let packages = value
+                .get("npm")
+                .and_then(Value::as_array)
+                .ok_or_else(unexpected)?;
+            if packages.iter().any(|item| {
+                item.get("name").and_then(Value::as_str) == Some(PACKAGE_NAME)
+                    && item.get("enabled").and_then(Value::as_bool) != Some(false)
+            }) {
+                found.push(Via::Package);
+            }
         }
         _ => return Err(unexpected()),
     }
-    Ok(scopes)
+    Ok(found)
 }
 
-/// The plugin's install scopes relevant to `root`, or `None` when the
-/// agent's CLI is not present.
-pub(crate) fn list_installs(agent: &Agent, root: &Path) -> Result<Option<Vec<String>>, String> {
+/// The plugin's installs relevant to `root`, or `None` when the agent's CLI
+/// is not present.
+pub(crate) fn list_installs(agent: &Agent, root: &Path) -> Result<Option<Vec<Via>>, String> {
     let output = match Command::new(agent.cli)
         .args(["plugin", "list", "--json"])
         .current_dir(root)
@@ -288,14 +319,15 @@ pub(crate) fn list_installs(agent: &Agent, root: &Path) -> Result<Option<Vec<Str
 
 /// The arguments that remove `install`.
 pub(crate) fn uninstall_args(install: &Install) -> Vec<String> {
-    let mut args = vec![
-        "plugin".to_owned(),
-        "uninstall".to_owned(),
-        PLUGIN_ID.to_owned(),
-    ];
-    match install.agent.name {
-        "omp" => args.push(format!("--scope={}", install.scope)),
-        _ => args.extend(["--scope".to_owned(), install.scope.clone()]),
+    let mut args = vec!["plugin".to_owned(), "uninstall".to_owned()];
+    match (&install.via, install.agent.name) {
+        (Via::Package, _) => args.push(PACKAGE_NAME.to_owned()),
+        (Via::Marketplace(scope), "omp") => {
+            args.extend([PLUGIN_ID.to_owned(), format!("--scope={scope}")]);
+        }
+        (Via::Marketplace(scope), _) => {
+            args.extend([PLUGIN_ID.to_owned(), "--scope".to_owned(), scope.clone()]);
+        }
     }
     args
 }
@@ -445,10 +477,16 @@ mod tests {
         .to_string();
         assert_eq!(
             parse_installs(&AGENTS[0], &claude, &root).unwrap(),
-            ["user", "project"]
+            [
+                Via::Marketplace("user".into()),
+                Via::Marketplace("project".into())
+            ]
         );
 
-        let omp = serde_json::json!({"npm": [{"id": PLUGIN_ID}], "marketplace": [
+        let omp = serde_json::json!({"npm": [
+            {"name": "other", "enabled": true},
+            {"name": PACKAGE_NAME, "version": "0.3.1", "path": "/p", "enabled": true},
+        ], "marketplace": [
             {"id": PLUGIN_ID, "scope": "user", "entries": [
                 {"scope": "user", "installPath": "/x"},
                 {"scope": "project", "installPath": "/y"},
@@ -459,16 +497,46 @@ mod tests {
         .to_string();
         assert_eq!(
             parse_installs(&AGENTS[1], &omp, &root).unwrap(),
-            ["user", "project"]
+            [
+                Via::Marketplace("user".into()),
+                Via::Marketplace("project".into()),
+                Via::Package
+            ]
         );
         assert_eq!(
             parse_installs(&AGENTS[1], r#"{"npm": [], "marketplace": []}"#, &root).unwrap(),
-            Vec::<String>::new()
+            []
         );
+        let disabled = serde_json::json!({"npm": [{"name": PACKAGE_NAME, "enabled": false}], "marketplace": []})
+            .to_string();
+        assert_eq!(parse_installs(&AGENTS[1], &disabled, &root).unwrap(), []);
+        assert!(parse_installs(&AGENTS[1], r#"{"marketplace": []}"#, &root).is_err());
 
         assert!(parse_installs(&AGENTS[0], "not json", &root).is_err());
         assert!(parse_installs(&AGENTS[1], "[]", &root).is_err());
         fs::remove_dir_all(&base).unwrap();
         fs::remove_dir_all(&other).unwrap();
+    }
+
+    #[test]
+    fn uninstall_args_per_kind() {
+        let args = |agent: usize, via: Via| {
+            uninstall_args(&Install {
+                agent: &AGENTS[agent],
+                via,
+            })
+        };
+        assert_eq!(
+            args(1, Via::Package),
+            ["plugin", "uninstall", "iced-impeccable"]
+        );
+        assert_eq!(
+            args(1, Via::Marketplace("user".into())),
+            ["plugin", "uninstall", PLUGIN_ID, "--scope=user"]
+        );
+        assert_eq!(
+            args(0, Via::Marketplace("project".into())),
+            ["plugin", "uninstall", PLUGIN_ID, "--scope", "project"]
+        );
     }
 }

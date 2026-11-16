@@ -135,8 +135,8 @@ fn install_usage() -> &'static str {
 #[cfg(feature = "cli")]
 /// `install [--agent claude,omp] [--yes] [DIR]`: copies the skill into the
 /// git repository containing DIR (default `.`) for the chosen agents, after
-/// removing a marketplace install of the plugin. Prints `ok`/`err` lines;
-/// returns the exit code (0 done, 1 aborted or failed, 2 bad usage).
+/// removing a marketplace or linked install of the plugin. Prints `ok`/`err`
+/// lines; returns the exit code (0 done, 1 aborted or failed, 2 bad usage).
 pub fn install(args: &[String]) -> i32 {
     let mut chosen: Option<Vec<&'static Agent>> = None;
     let mut yes = false;
@@ -189,16 +189,16 @@ pub fn install(args: &[String]) -> i32 {
         }
     };
 
-    // The marketplace plugin would load next to the repo copy.
+    // A marketplace or linked plugin would load next to the repo copy.
     let mut detected = [false; AGENTS.len()];
     let mut installs = Vec::new();
     for (i, agent) in AGENTS.iter().enumerate() {
         match install::list_installs(agent, &root) {
             Err(e) => eprintln!("warning: {e}"),
             Ok(None) => {}
-            Ok(Some(scopes)) => {
+            Ok(Some(found)) => {
                 detected[i] = true;
-                installs.extend(scopes.into_iter().map(|scope| Install { agent, scope }));
+                installs.extend(found.into_iter().map(|via| Install { agent, via }));
             }
         }
     }
@@ -269,7 +269,7 @@ pub fn install(args: &[String]) -> i32 {
 fn remove_plugin(installs: &[Install], root: &Path, yes: bool) -> Result<(), ()> {
     say!("the iced-impeccable plugin is installed and would load next to the repo copy:");
     for install in installs {
-        say!("  {} {}", install.agent.name, install.scope);
+        say!("  {} {}", install.agent.name, install.via);
     }
     if !yes {
         if !io::stdin().is_terminal() {
@@ -287,24 +287,24 @@ fn remove_plugin(installs: &[Install], root: &Path, yes: bool) -> Result<(), ()>
             say!("err {e}");
             return Err(());
         }
-        say!("removed {} {}", install.agent.name, install.scope);
+        say!("removed {} {}", install.agent.name, install.via);
     }
     for agent in AGENTS.iter() {
         if !installs.iter().any(|i| std::ptr::eq(i.agent, agent)) {
             continue;
         }
         match install::list_installs(agent, root) {
-            Ok(Some(scopes)) if !scopes.is_empty() => {
-                let scope = scopes[0].clone();
-                let command = install::uninstall_args(&Install {
+            Ok(Some(found)) if !found.is_empty() => {
+                let left = Install {
                     agent,
-                    scope: scope.clone(),
-                });
+                    via: found[0].clone(),
+                };
                 say!(
-                    "err {} still lists the plugin ({scope}); remove it with: {} {}",
+                    "err {} still lists the plugin ({}); remove it with: {} {}",
                     agent.cli,
+                    left.via,
                     agent.cli,
-                    command.join(" ")
+                    install::uninstall_args(&left).join(" ")
                 );
                 return Err(());
             }

@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- The plugin can be linked into omp without a marketplace
+  (`omp plugin link <clone>/plugin`).
+- `iced-impeccable install` detects that linked package and offers to remove
+  it (`omp plugin uninstall iced-impeccable`).
+
 ## [0.3.1] - 2026-11-16
 
 ### Changed
